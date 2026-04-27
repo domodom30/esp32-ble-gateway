@@ -1,78 +1,101 @@
-# esp32-ble-gateway
+# 📡 esp32-ble-gateway
 
-WiFi to BLE (Bluetooth Low Energy) gateway on ESP32 using a modified version of [Noble](https://github.com/abandonware/noble)'s [WebSocket protocol](https://github.com/abandonware/noble/blob/master/ws-slave.js). The modifications consist in an added authentication layer upon connection and some extra payloads here and there. It's designed to be used with [ttlock-sdk-js](https://github.com/kind3r/ttlock-sdk-js) at least until I will find the time to document the API and implement a separate Noble binding. Note that data flows is via **standard unencrypted websocket** as the ESP can barely handle the memory requirements for BLE, WiFi and WebSocket at the same time and besides gateway is supposed to be in your LAN and the BLE traffic can be easilly sniffed over the air so there isn't really a point in encrypting all communication at this time.
+[![Platform](https://img.shields.io/badge/platform-ESP32--WROVER-blue?logo=espressif)](https://www.espressif.com/)
+[![Framework](https://img.shields.io/badge/framework-Arduino%20%2F%20PlatformIO-orange?logo=platformio)](https://platformio.org/)
+[![NimBLE](https://img.shields.io/badge/NimBLE--Arduino-2.x-green)](https://github.com/h2zero/NimBLE-Arduino)
+[![WebUI](https://img.shields.io/badge/WebUI-Vue%203%20%2B%20Vite-42b883?logo=vue.js)](https://vuejs.org/)
+[![License](https://img.shields.io/github/license/domodom30/esp32-ble-gateway)](LICENSE)
 
-> Note: this has nothing to do with the TTLock G2 official gateway, it is basically just a GATT proxy over WiFi.
+> _Fork of [kind3r/esp32-ble-gateway](https://github.com/kind3r/esp32-ble-gateway) with modernized stack and new features._
 
-> **This fork** includes the following changes over the [original repository](https://github.com/kind3r/esp32-ble-gateway):
+---
+
+## Overview
+
+Bridges WiFi and BLE using a modified version of [Noble](https://github.com/abandonware/noble)'s
+[WebSocket protocol](https://github.com/abandonware/noble/blob/master/ws-slave.js).
+Designed to work with [ttlock-sdk-js](https://github.com/kind3r/ttlock-sdk-js) and the
+[TTLock Home Assistant addon](https://github.com/kind3r/hass-addons).
+
+Data flows over **standard WebSocket** (unencrypted) — the ESP32 cannot handle BLE + WiFi + TLS
+simultaneously, and since the gateway is inside your LAN, BLE traffic can already be sniffed over the air.
+
+> ℹ️ This is **not** related to the official TTLock G2 gateway — it is a GATT proxy over WiFi.
 >
-> - Migration to **NimBLE-Arduino 2.x** (was using the standard Arduino BLE library)
-> - Migration of the WebUI from **Vue 2 → Vue 3 + Vite** (single-file build, no CDN dependencies)
-> - **Configurable admin login and password** via the web interface (no longer hardcoded)
-> - **Static IP** configuration via the web interface (optional, DHCP by default)
-> - Stack size increase handled via `build_flags` in `platformio.ini` — no manual `sdkconfig.h` edit required
-> - Custom partition table (`partitions_custom.csv`) replacing `min_spiffs.csv`
-> - TLS certificate generated with RSA-1024 to avoid stack overflow during generation
+> Feeling generous? Support the original author: [PayPal](https://paypal.me/kind3r)
 
-## What works for now
+---
 
-- WiFi init with AP style configuration via HTTPS web page
-- Websocket communication and AES 128 CBC auth
-- Start/stop BLE scan
-- Discover devices
-- Read characteristics
-- Write characteristics
-- Subscribe to characteristic
+## What's new in this fork
 
-## How to install
+| Change | Details |
+| --- | --- |
+| 🔧 **NimBLE-Arduino 2.x** | Migrated from the standard Arduino BLE library |
+| 🖥️ **Vue 3 + Vite WebUI** | Replaced Vue 2 / Bootstrap — single-file build, no CDN |
+| 🔑 **Configurable credentials** | Admin login & password editable via the web interface |
+| 🌐 **Static IP support** | Optional static IP / mask / gateway / DNS (DHCP by default) |
+| ⚙️ **No `sdkconfig.h` edit** | Stack size set via `build_flags` in `platformio.ini` |
+| 📦 **Custom partitions** | `partitions_custom.csv` replaces `min_spiffs.csv` |
+| 🔒 **RSA-1024 certificate** | Avoids stack overflow during TLS cert generation on first boot |
 
-This short guide explains how to install the gateway and configure the [TTLock Home Assistant addon](https://github.com/kind3r/hass-addons) so that you can interface it with a TTLock lock. You need to compile and upload the binary yourself, there is no pre-compiled version but the process should be fairly easy even for beginers.
+---
 
-### Requirements
+## Features
 
-1. [Visual Studio Code (VSCode)](https://code.visualstudio.com/) and [PlatformIO](https://platformio.org/) extension.
-2. A clone of this repository
-3. A working **ESP32-WROVER board**
-4. Some type of TTLock lock paired to a working Home Assistant installation with [TTLock Home Assistant addon](https://github.com/kind3r/hass-addons)
+- ✅ WiFi configuration via HTTPS web interface (AP mode on first boot)
+- ✅ WebSocket communication with AES-128-CBC authentication
+- ✅ BLE scan start / stop
+- ✅ Device discovery
+- ✅ Read / Write GATT characteristics
+- ✅ Subscribe to characteristic notifications
 
-### Preparing the ESP32
+---
 
-Open the cloned repo in VSCode and PlatformIO should automatically install all the required dependencies (it will take a couple of minutes, depending on your computer and internet speed, be patient and let it *settle*).
+## Installation
 
-> **No manual `sdkconfig.h` edit is required.** The stack size is now set to `16384` bytes directly via `build_flags` in `platformio.ini` (`-DCONFIG_ARDUINO_LOOP_STACK_SIZE=16384`). This is necessary because the HTTPS certificate generation requires more stack space than the default.
+> **Requirements:** [VS Code](https://code.visualstudio.com/) + [PlatformIO extension](https://platformio.org/),
+> an **ESP32-WROVER** board, and a TTLock device paired with Home Assistant.
 
-> At the moment, the project is only configured to work on **ESP32-WROVER boards**. If you have a different board, you need to edit the `platformio.ini` file and create your own env configuration. The project uses a custom partition table (`partitions_custom.csv`) to balance firmware and SPIFFS storage.
+### 1 — Flash the filesystem
 
-Connect your ESP32 to the PC, go to PlatformIO menu (the alien head on the VSCode's left toolbar, where you have files, search, plugins etc.) then in **Project Tasks** choose **env:esp-wrover** -> **Platform** -> **Upload Filesystem Image**. This will 'format' the storage and upload the web UI.
+Open the project in VS Code. PlatformIO will automatically install all dependencies.
 
-Next, you need to build and upload the main code. In **Project Tasks** choose **env:esp-wrover** -> **General** -> **Upload and Monitor**. This should start the build process and once it is finished the compiled result will be uploaded to the ESP32.
+In **PlatformIO Project Tasks**, go to:
 
-Once the upload finishes you should start seeing some debug output, including the status of the WiFi AP and HTTPS certificate generation status (it will take quite some time so be patient — RSA-1024 certificate generation can take up to ~30 seconds on first boot). After the startup is completed, you can connect to ESP's AP named **ESP32GW** with password **87654321** and access [https://esp32gw.local](https://esp32gw.local). The browser will complain about the self-signed certificate but you can ignore and continue. The default credentials are **admin / admin**.
+```text
+env:esp-wrover > Platform > Upload Filesystem Image
+```
 
-In the web interface you can configure:
+This uploads the web interface (~29 kB gzipped) to the ESP32's SPIFFS partition.
 
-- **Gateway name** — used as the mDNS hostname (`<name>.local`)
-- **Admin login** and **Admin password** — HTTP Basic Auth credentials to protect the web interface and WebSocket connections
-- **WiFi SSID** and **WiFi password** — the network to connect to
-- **AES Key** — the shared key used to authenticate WebSocket clients (copy this into the HA addon config)
-- **Static IP** *(optional)* — IP address, subnet mask, gateway and DNS; leave all fields empty to use DHCP
+### 2 — Flash the firmware
 
-After saving the new configuration, the ESP will reboot, connect to your WiFi and output its **IP address** on the serial port (it will also generate a new HTTPS certificate if you changed its name). It will also be accessible via `esp32gw.local` (or the new name you gave it) via MDNS if this service is working in your network. You can still make configuration changes by accessing its IP address in the browser.
+```text
+env:esp-wrover > General > Upload and Monitor
+```
 
-### Building the WebUI (optional)
+> On **first boot**, the ESP32 generates a self-signed RSA-1024 TLS certificate.
+> This can take up to ~30 seconds — be patient.
 
-The compiled WebUI (`data/index.html.gz`) is already included in the repository. If you want to modify it:
+### 3 — First configuration
 
-1. Go to the `webui/` directory
-2. Run `npm install`
-3. Run `npm run build` — this produces `data/index.html.gz` (single-file, gzip compressed, ~29 kB)
-4. Re-flash the filesystem: **PlatformIO** -> **env:esp-wrover** -> **Platform** -> **Upload Filesystem Image**
+1. Connect to the WiFi AP **`ESP32GW`** (password: `87654321`)
+2. Open <https://esp32gw.local> and accept the self-signed certificate warning
+3. Log in with **`admin` / `admin`** (default credentials)
+4. Configure the settings below and click **Save**
 
-The WebUI is built with **Vue 3 + Vite** and uses `vite-plugin-singlefile` to inline everything into a single HTML file, then `vite-plugin-compression2` to gzip it for SPIFFS.
+| Setting | Description |
+| --- | --- |
+| **Gateway name** | mDNS hostname: `<name>.local` |
+| **Admin login / password** | Protects the web interface and WebSocket connections |
+| **WiFi SSID / password** | Network to connect to after reboot |
+| **AES Key** | Shared key for WebSocket client authentication — copy this to the HA addon |
+| **Static IP** _(optional)_ | IP, mask, gateway, DNS — leave empty for DHCP |
 
-### Setting up HA
+After saving, the ESP reboots, connects to your WiFi, and prints its **IP address** on the serial port.
+It will be reachable at `<name>.local` via mDNS, or directly by IP.
 
-Once you have the ESP running the gateway software, go to the **TTLock Home Assistant addon** configuration options and add the following:
+### 4 — Configure the HA addon
 
 ```yaml
 gateway: noble
@@ -83,25 +106,35 @@ gateway_user: YOUR_ADMIN_LOGIN
 gateway_pass: YOUR_ADMIN_PASSWORD
 ```
 
-> The **login and password are configurable** via the web interface (default: `admin` / `admin`). The port is fixed at `8080`. You will need to update the **IP address of the ESP gateway**, the **AES key**, and your **credentials** if you changed them.
+Add `gateway_debug: true` for verbose logging in Home Assistant.
 
-For extra debug info, you can add the `gateway_debug: true` option to log all communication to and from the gateway in Home Assistant.
+---
 
-If everything was done correctly you should now be able to use the addon using the ESP32 device as a BLE gateway.
+## WebUI development (optional)
 
-## Todo
+The pre-built WebUI (`data/index.html.gz`) is included — no Node.js required to flash the device.
 
-- check if multiple connections to multiple devices are possible (`BLEDevice::createClient` seems to store only 1 `BLEClient`, but we could just create the client ourselves)
-- Service UUID filtering for scan and allow/disallow duplicates
-- Timeout for non-authenticated connections
-- Investigate unstable wifi (sometimes it connects but there is no traffic; try to ping gw during setup)
-- Optimize memory fragmentation
-- OTA firmware update via web interface
+To modify the interface:
 
-### Random thoughts
+```bash
+cd webui
+npm install
+npm run build     # generates data/index.html.gz (~29 kB)
+```
 
-- device discovery is always sent to all authenticated clients
-- give each device a unique ID (peripheralUuid) and store ID, address and address type in a Map as it is required for connection
-- connection is done based on peripheralUuid translated to address and type in the noble_api
-- always stop scanning before connecting to a device
-- only one client can connect to a device at a time so associate websocket with connection and cleanup on disconnect
+Then re-flash the filesystem (step 1 above).
+
+Built with **Vue 3 + Vite**,
+[`vite-plugin-singlefile`](https://github.com/richardtallent/vite-plugin-singlefile) (inline assets)
+and [`vite-plugin-compression2`](https://github.com/nonzzz/vite-plugin-compression) (gzip for SPIFFS).
+
+---
+
+## Roadmap
+
+- [ ] Multiple simultaneous BLE device connections
+- [ ] Service UUID filtering for scan
+- [ ] Timeout for non-authenticated WebSocket connections
+- [ ] Investigate intermittent WiFi instability
+- [ ] Memory fragmentation optimization
+- [ ] OTA firmware update via web interface
