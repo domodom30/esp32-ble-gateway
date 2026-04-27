@@ -4,8 +4,6 @@ WiFi to BLE (Bluetooth Low Energy) gateway on ESP32 using a modified version of 
 
 > Note: this has nothing to do with the TTLock G2 official gateway, it is basically just a GATT proxy over WiFi.
 
-Feeling generous and want to support my work, here is [my PayPal link](https://paypal.me/kind3r).
-
 > **This fork** includes the following changes over the [original repository](https://github.com/kind3r/esp32-ble-gateway):
 >
 > - Migration to **NimBLE-Arduino 2.x** (was using the standard Arduino BLE library)
