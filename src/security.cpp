@@ -31,10 +31,18 @@ void Security::generateKey(char *newKey) {
 
 void Security::setKey(const char *aesKey)
 {
-  keyLength = strlen(aesKey) / 2;
-  uint8_t localKey[keyLength];
-  fromHex(aesKey, keyLength * 2, localKey);
-  ESP_LOG_BUFFER_HEX("KEY      ", localKey, keyLength);
+  size_t hexLen = strlen(aesKey) / 2;
+  uint8_t localKey[BLOCK_SIZE];
+  memset(localKey, 0, BLOCK_SIZE);
+  size_t copyLen = hexLen < BLOCK_SIZE ? hexLen : BLOCK_SIZE;
+  fromHex(aesKey, copyLen * 2, localKey);
+  if (hexLen != BLOCK_SIZE)
+  {
+    Serial.printf("WARNING: AES key is %u bytes, expected %u; zero-padding/truncating\n",
+                   (unsigned)hexLen, (unsigned)BLOCK_SIZE);
+  }
+  // the key buffer is always BLOCK_SIZE (128-bit); never read past it
+  keyLength = BLOCK_SIZE;
   memcpy(key, localKey, BLOCK_SIZE);
 }
 

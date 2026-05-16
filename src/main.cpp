@@ -58,6 +58,7 @@ bool setupWifi()
     {
       Serial.print("IP Address: ");
       Serial.println(WiFi.localIP());
+      WiFi.setAutoReconnect(true);
       connected = true;
       return true;
     }
@@ -95,19 +96,61 @@ void setup()
   setupWeb();
 
   bool mdnsSuccess = false;
+  uint8_t mdnsRetry = 5;
   do
   {
     mdnsSuccess = MDNS.begin(GwSettings::getName());
-  } while (mdnsSuccess == false);
+    if (!mdnsSuccess)
+    {
+      Serial.println("mDNS start failed, retrying...");
+      delay(500);
+    }
+  } while (!mdnsSuccess && --mdnsRetry > 0);
 
-  MDNS.addService("http", "tcp", ESP_GW_WEBSERVER_PORT);
+  if (mdnsSuccess)
+  {
+    MDNS.addService("http", "tcp", ESP_GW_WEBSERVER_PORT);
+  }
+  else
+  {
+    Serial.println("WARNING: mDNS unavailable; reach the gateway by IP address");
+  }
 
   NobleApi::init();
 
-  MDNS.addService("ws", "tcp", ESP_GW_WEBSOCKET_PORT);
+  if (mdnsSuccess)
+  {
+    MDNS.addService("ws", "tcp", ESP_GW_WEBSOCKET_PORT);
+  }
 
   Serial.println("Setup complete");
   meminfo();
+}
+
+// Non-blocking WiFi watchdog: in STA mode, periodically check the link and
+// trigger a reconnect with back-off if it dropped. Never blocks the loop.
+void maintainWifi()
+{
+  static uint32_t lastCheck = 0;
+  static uint32_t lastReconnect = 0;
+  uint32_t now = millis();
+  if (now - lastCheck < 10000)
+  {
+    return;
+  }
+  lastCheck = now;
+  if (WiFi.status() == WL_CONNECTED)
+  {
+    return;
+  }
+  if (lastReconnect != 0 && now - lastReconnect < 15000)
+  {
+    return; // back-off between attempts
+  }
+  lastReconnect = now;
+  Serial.println("WiFi disconnected, attempting reconnect");
+  WiFi.disconnect();
+  WiFi.begin(GwSettings::getSsid(), GwSettings::getPass());
 }
 
 void loop()
@@ -116,6 +159,10 @@ void loop()
   {
     // when in configuration mode handle DNS requests
     dnsServer->processNextRequest();
+  }
+  else
+  {
+    maintainWifi();
   }
   NobleApi::loop();
   WebManager::loop();

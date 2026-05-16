@@ -1,4 +1,5 @@
 #include "gw_settings.h"
+#include <cstring>
 
 bool GwSettings::ready = false;
 Preferences GwSettings::prefs;
@@ -13,6 +14,8 @@ size_t GwSettings::ssidLen = 0;
 char *GwSettings::pass = nullptr;
 size_t GwSettings::passLen = 0;
 char *GwSettings::aes = nullptr;
+char *GwSettings::bleToken = nullptr;
+size_t GwSettings::bleTokenLen = 0;
 char *GwSettings::staticIp = nullptr;
 char *GwSettings::staticMask = nullptr;
 char *GwSettings::staticGw = nullptr;
@@ -29,10 +32,12 @@ bool GwSettings::init()
   prefs.begin("ESP32GW");
 
   if (!prefs.isKey("name"))
-  { // default name
-    nameLen = 7;
-    name = const_cast<char *>("esp32gw");
-    prefs.putBytes("name", name, nameLen);
+  { // default name (heap-allocated so setters can delete[] it safely)
+    const char *def = "esp32gw";
+    nameLen = strlen(def) + 1;
+    name = new char[nameLen];
+    memcpy(name, def, nameLen);
+    prefs.putBytes("name", name, nameLen - 1);
   }
   else
   {
@@ -43,10 +48,12 @@ bool GwSettings::init()
   }
 
   if (!prefs.isKey("password"))
-  { // default admin password
-    passwordLen = 5;
-    password = const_cast<char *>("admin");
-    prefs.putBytes("password", password, passwordLen);
+  { // default admin password (heap-allocated, see name above)
+    const char *def = "admin";
+    passwordLen = strlen(def) + 1;
+    password = new char[passwordLen];
+    memcpy(password, def, passwordLen);
+    prefs.putBytes("password", password, passwordLen - 1);
   }
   else
   {
@@ -57,10 +64,12 @@ bool GwSettings::init()
   }
 
   if (!prefs.isKey("login"))
-  { // default login
-    loginLen = 5;
-    login = const_cast<char *>("admin");
-    prefs.putBytes("login", login, loginLen);
+  { // default login (heap-allocated, see name above)
+    const char *def = "admin";
+    loginLen = strlen(def) + 1;
+    login = new char[loginLen];
+    memcpy(login, def, loginLen);
+    prefs.putBytes("login", login, loginLen - 1);
   }
   else
   {
@@ -96,6 +105,23 @@ bool GwSettings::init()
   {
     prefs.getBytes("aes", aes, BLOCK_SIZE * 2);
     aes[BLOCK_SIZE * 2] = '\0';
+  }
+
+  // BLE WebSocket auth token (default "admin:admin" for backward compat)
+  if (!prefs.isKey("ble_token"))
+  {
+    const char *def = "admin:admin";
+    bleTokenLen = strlen(def) + 1;
+    bleToken = new char[bleTokenLen];
+    memcpy(bleToken, def, bleTokenLen);
+    prefs.putBytes("ble_token", bleToken, bleTokenLen - 1);
+  }
+  else
+  {
+    bleTokenLen = prefs.getBytesLength("ble_token") + 1;
+    bleToken = new char[bleTokenLen];
+    prefs.getBytes("ble_token", bleToken, bleTokenLen - 1);
+    bleToken[bleTokenLen - 1] = '\0';
   }
 
   // Static IP settings (optional)
@@ -229,6 +255,27 @@ void GwSettings::setPass(const char *val, size_t len)
 char *GwSettings::getAes()
 {
   return aes;
+}
+
+// val must be a BLOCK_SIZE*2 hex string (validated by the caller).
+// `aes` is always allocated as new char[BLOCK_SIZE*2+1] in init().
+void GwSettings::setAes(const char *val, size_t len)
+{
+  (void)len;
+  prefs.putBytes("aes", (uint8_t *)val, BLOCK_SIZE * 2);
+  memcpy(aes, val, BLOCK_SIZE * 2);
+  aes[BLOCK_SIZE * 2] = '\0';
+}
+
+char *GwSettings::getBleToken() { return bleToken; }
+size_t GwSettings::getBleTokenLen() { return bleTokenLen; }
+void GwSettings::setBleToken(const char *val, size_t len)
+{
+  prefs.putBytes("ble_token", val, len - 1);
+  delete[] bleToken;
+  bleTokenLen = len;
+  bleToken = new char[bleTokenLen];
+  memcpy(bleToken, val, bleTokenLen);
 }
 
 char *GwSettings::getLogin() { return login; }

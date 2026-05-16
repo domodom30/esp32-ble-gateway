@@ -60,8 +60,12 @@ void BLEApi::init()
     bleScan = NimBLEDevice::getScan();
     _advertisedDeviceCallback = new myAdvertisedDeviceCallbacks();
     bleScan->setScanCallbacks(_advertisedDeviceCallback, true);
-    bleScan->setInterval(1250); // 1349
-    bleScan->setWindow(650);    // 449
+    // NimBLE 2.x : setInterval/setWindow sont en millisecondes (et non plus en
+    // unités 0,625 ms). Scan quasi-continu (duty 90 %) pour une découverte
+    // rapide des advertisements « newEvents ». Sûr car connect() stoppe le
+    // scan avant toute connexion.
+    bleScan->setInterval(100); // ms
+    bleScan->setWindow(90);    // ms
     _clientCallback = new myClientCallbacks();
     // TODO: maybe do some pre-descovery to get address types of devices around us
     // in case ESP was rebooted and clients try to connect before doing a scan
@@ -156,7 +160,13 @@ bool BLEApi::connect(BLEPeripheralID id)
   int8_t retry = 5;
   log_i("Connect attempt start");
   peripheral = NimBLEDevice::createClient();
-  peripheral->setConnectTimeout(10000); // 10 seconds (NimBLE 2.x: milliseconds)
+  peripheral->setConnectTimeout(5000); // 5 s (NimBLE 2.x: ms) — feedback d'échec plus rapide
+  // Intervalle de connexion court : le SDK TTLock fragmente les commandes en
+  // trames de 20 octets (une trame par intervalle de connexion), donc un
+  // intervalle court accélère nettement les longues séquences (lecture du
+  // journal). Unités : 1,25 ms pour les intervalles, 10 ms pour la
+  // supervision → 12 = 15 ms, latency 0, timeout 200 = 2000 ms.
+  peripheral->setConnectionParams(12, 12, 0, 200);
   do
   {
     // TODO: sometimes the connect fails and remains hanging in the semaphore, patch BLE lib ?

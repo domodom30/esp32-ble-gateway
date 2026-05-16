@@ -48,6 +48,7 @@ class WebManager {
     static void handleConfigGet(HTTPRequest * req, HTTPResponse * res);
     static void handleConfigSet(HTTPRequest * req, HTTPResponse * res);
     static void handleFactoryReset(HTTPRequest * req, HTTPResponse * res);
+    static void handleRestart(HTTPRequest * req, HTTPResponse * res);
     static void handleRedirect(HTTPRequest * req, HTTPResponse * res);
     static void handleNotFound(HTTPRequest *req, HTTPResponse *res);
 };

@@ -32,6 +32,11 @@ public:
   static void setPass(const char *val, size_t len);
 
   static char *getAes();
+  static void setAes(const char *val, size_t len);
+
+  static char *getBleToken();
+  static size_t getBleTokenLen();
+  static void setBleToken(const char *val, size_t len);
 
   static char *getStaticIp();
   static void setStaticIp(const char *val, size_t len);
@@ -77,6 +82,9 @@ private:
   static size_t passLen;
 
   static char *aes;
+
+  static char *bleToken;
+  static size_t bleTokenLen;
 
   static char *staticIp;
   static char *staticMask;

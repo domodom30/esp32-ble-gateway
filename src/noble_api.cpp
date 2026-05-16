@@ -5,6 +5,8 @@ bool NobleApi::ready = false;
 Security *NobleApi::sec = nullptr;
 WebSocketsServer *NobleApi::ws = nullptr;
 Challenge NobleApi::challenges[WEBSOCKETS_SERVER_CLIENT_MAX];
+uint32_t NobleApi::authDeadline[WEBSOCKETS_SERVER_CLIENT_MAX];
+#define AUTH_TIMEOUT_MS 10000
 PeripheralClient NobleApi::peripheralConnections[MAX_CLIENT_CONNECTIONS];
 uint8_t NobleApi::activeConnections = 0;
 
@@ -40,6 +42,7 @@ bool NobleApi::init()
   for (auto i = 0; i < WEBSOCKETS_SERVER_CLIENT_MAX; i++)
   {
     clearChallenge(challenges[i]);
+    authDeadline[i] = 0;
   }
 
   // instantiate security module
@@ -70,7 +73,21 @@ void NobleApi::loop()
   {
     // Process websocket events
     ws->loop();
-    // TODO: disconnect clients that did not authenticate in a resonable timeframe
+
+    // disconnect clients that did not authenticate within AUTH_TIMEOUT_MS
+    uint32_t now = millis();
+    for (uint8_t client = 0; client < WEBSOCKETS_SERVER_CLIENT_MAX; client++)
+    {
+      if (authDeadline[client] != 0 && now > authDeadline[client])
+      {
+        if (ws->clientIsConnected(client) && !isEmptyChallenge(challenges[client]))
+        {
+          Serial.printf("[%u] Auth timeout, disconnecting\n", client);
+          ws->disconnect(client);
+        }
+        authDeadline[client] = 0;
+      }
+    }
   }
 }
 
@@ -93,6 +110,7 @@ void NobleApi::clientDisconnectCleanup(uint8_t client)
   }
 
   clearChallenge(challenges[client]);
+  authDeadline[client] = 0;
 }
 
 /**
@@ -133,8 +151,6 @@ void NobleApi::onWsEvent(uint8_t client, WStype_t type, uint8_t *payload, size_t
     if (ws->connectedClients() == 0)
     {
       BLEApi::stopScan();
-      // just do a restart to cleanup everything for now
-      // ESP.restart();
     }
     meminfo();
   }
@@ -151,7 +167,7 @@ void NobleApi::onWsEvent(uint8_t client, WStype_t type, uint8_t *payload, size_t
   {
     // Serial.printf("[%u] get  Text: %s\n", client, payload);
 
-    StaticJsonDocument<1024> command;
+    JsonDocument command;
     DeserializationError error = deserializeJson(command, payload, length);
 
     if (error != DeserializationError::Ok)
@@ -277,15 +293,20 @@ void NobleApi::onWsEvent(uint8_t client, WStype_t type, uint8_t *payload, size_t
                   std::string characteristicUuid = command["characteristicUuid"];
                   std::string dataHex = command["data"];
                   size_t length = dataHex.length() / 2;
-                  uint8_t data[length];
-                  sec->fromHex(dataHex.c_str(), length * 2, data);
-                  bool withoutResponse = command["withoutResponse"];
-                  if (BLEApi::writeCharacteristic(peripheralUuid, serviceUuid, characteristicUuid, data, length, withoutResponse))
-                  { // success
+                  // BLE attribute values are at most 512 bytes; reject oversized
+                  // payloads so the stack VLA below stays bounded
+                  if (length == 0 || length > 512)
+                  {
+                    Serial.printf("Rejected write: invalid data length %u\n", (unsigned)length);
                     sendCharacteristicWrite(client, peripheralUuid, serviceUuid, characteristicUuid);
                   }
                   else
-                  { // failed
+                  {
+                    uint8_t data[length];
+                    sec->fromHex(dataHex.c_str(), length * 2, data);
+                    bool withoutResponse = command["withoutResponse"];
+                    // success and failure currently send the same ack
+                    BLEApi::writeCharacteristic(peripheralUuid, serviceUuid, characteristicUuid, data, length, withoutResponse);
                     sendCharacteristicWrite(client, peripheralUuid, serviceUuid, characteristicUuid);
                   }
                 }
@@ -326,7 +347,7 @@ void NobleApi::onWsEvent(uint8_t client, WStype_t type, uint8_t *payload, size_t
 
 void NobleApi::onBLEDeviceFound(NimBLEAdvertisedDevice *advertisedDevice, BLEPeripheralID id)
 {
-  StaticJsonDocument<1024> command;
+  JsonDocument command;
   command["type"] = "discover";
   command["peripheralUuid"] = BLEApi::idToString(id);
   command["address"] = advertisedDevice->getAddress().toString();
@@ -351,14 +372,14 @@ void NobleApi::onBLEDeviceFound(NimBLEAdvertisedDevice *advertisedDevice, BLEPer
   }
   if (advertisedDevice->haveServiceUUID())
   {
-    JsonArray serviceUuids = command["advertisement"].createNestedArray("serviceUuids");
+    JsonArray serviceUuids = command["advertisement"]["serviceUuids"].to<JsonArray>();
     serviceUuids.add(advertisedDevice->getServiceUUID().toString());
   }
   if (advertisedDevice->haveManufacturerData())
   {
     char manufacturerData[advertisedDevice->getManufacturerData().length() * 2 + 1];
+    // toHex already writes the trailing '\0' at index length*2
     sec->toHex((uint8_t *)advertisedDevice->getManufacturerData().data(), advertisedDevice->getManufacturerData().length(), manufacturerData);
-    manufacturerData[advertisedDevice->getManufacturerData().length() * 2 + 1] = '\0';
     command["advertisement"]["manufacturerData"] = manufacturerData;
   }
 
@@ -394,6 +415,7 @@ void NobleApi::onCharacteristicNotification(BLEPeripheralID id, std::string serv
 void NobleApi::initClient(uint8_t client)
 {
   sec->generateIV((uint8_t *)challenges[client]);
+  authDeadline[client] = millis() + AUTH_TIMEOUT_MS;
 }
 
 void NobleApi::checkAuth(uint8_t client, const char *response)
@@ -411,9 +433,10 @@ void NobleApi::checkAuth(uint8_t client, const char *response)
       size_t decryptedResponseLength = sec->decrypt((uint8_t *)challenges[client], encryptedResponse, encryptedResponseLength, decryptedResponse);
       decryptedResponse[encryptedResponseLength] = '\0';
 
-      if (strcmp((char *)decryptedResponse, "admin:admin") == 0)
+      if (strcmp((char *)decryptedResponse, GwSettings::getBleToken()) == 0)
       {
         clearChallenge(challenges[client]);
+        authDeadline[client] = 0;
         sendState(client);
       }
       else
@@ -429,14 +452,9 @@ void NobleApi::checkAuth(uint8_t client, const char *response)
 void NobleApi::sendJsonMessage(JsonDocument &command, const uint8_t client)
 {
   size_t messageLength = measureJson(command) + 1;
-  // Serial.println(messageLength);
   char buffer[messageLength];
-  // String buffer;
+  // serializeJson null-terminates within `messageLength`; no manual terminator
   serializeJson(command, buffer, messageLength);
-  buffer[messageLength] = '\0';
-  command.clear();
-  // ESP_LOG_BUFFER_HEXDUMP("Send", buffer, messageLength, esp_log_level_t::ESP_LOG_INFO);
-  // Serial.printf("[%u] sent Text: %s\n", client, buffer);
   ws->sendTXT(client, buffer);
   command.clear();
 }
@@ -445,12 +463,10 @@ void NobleApi::sendJsonMessage(JsonDocument &command)
 {
   size_t messageLength = measureJson(command) + 1;
   char buffer[messageLength];
+  // serializeJson null-terminates within `messageLength`; no manual terminator
   serializeJson(command, buffer, messageLength);
-  buffer[messageLength] = '\0';
   command.clear();
 
-  std::map<uint32_t, std::string>::iterator it;
-  (void)it; // suppress unused warning
   for (uint8_t client = 0; client < WEBSOCKETS_SERVER_CLIENT_MAX; client++)
   {
     if (ws->clientIsConnected(client))
@@ -471,7 +487,7 @@ void NobleApi::sendAuthMessage(const uint8_t client)
 {
   if (!isEmptyChallenge(challenges[client]))
   {
-    StaticJsonDocument<128> command;
+    JsonDocument command;
     command["type"] = "auth";
     char challenge[BLOCK_SIZE * 2 + 1];
     sec->toHex((uint8_t *)challenges[client], BLOCK_SIZE, challenge);
@@ -483,7 +499,7 @@ void NobleApi::sendAuthMessage(const uint8_t client)
 
 void NobleApi::sendState(const uint8_t client)
 {
-  StaticJsonDocument<64> command;
+  JsonDocument command;
   command["type"] = "stateChange";
   if (BLEApi::isReady())
   {
@@ -499,7 +515,7 @@ void NobleApi::sendState(const uint8_t client)
 
 void NobleApi::sendConnected(const uint8_t client, BLEPeripheralID id)
 {
-  StaticJsonDocument<128> command;
+  JsonDocument command;
   command["type"] = "connect";
   command["peripheralUuid"] = BLEApi::idToString(id);
   sendJsonMessage(command, client);
@@ -512,7 +528,7 @@ void NobleApi::sendDisconnected(const uint8_t client, BLEPeripheralID id)
 
 void NobleApi::sendDisconnected(const uint8_t client, BLEPeripheralID id, std::string reason)
 {
-  StaticJsonDocument<128> command;
+  JsonDocument command;
   command["type"] = "disconnect";
   command["peripheralUuid"] = BLEApi::idToString(id);
   if (reason != "")
@@ -524,10 +540,10 @@ void NobleApi::sendDisconnected(const uint8_t client, BLEPeripheralID id, std::s
 
 void NobleApi::sendServices(const uint8_t client, BLEPeripheralID id, const std::vector<NimBLERemoteService *> *services)
 {
-  StaticJsonDocument<512> command;
+  JsonDocument command;
   command["type"] = "servicesDiscover";
   command["peripheralUuid"] = BLEApi::idToString(id);
-  JsonArray serviceUuids = command.createNestedArray("serviceUuids");
+  JsonArray serviceUuids = command["serviceUuids"].to<JsonArray>();
   for (NimBLERemoteService *service : *services)
   {
     NimBLEUUID uuid = service->getUUID();
@@ -538,17 +554,17 @@ void NobleApi::sendServices(const uint8_t client, BLEPeripheralID id, const std:
 
 void NobleApi::sendCharacteristics(const uint8_t client, BLEPeripheralID id, std::string service, const std::vector<NimBLERemoteCharacteristic *> *characteristics)
 {
-  StaticJsonDocument<512> command;
+  JsonDocument command;
   command["type"] = "characteristicsDiscover";
   command["peripheralUuid"] = BLEApi::idToString(id);
   command["serviceUuid"] = service;
-  JsonArray characteristicsUuids = command.createNestedArray("characteristics");
+  JsonArray characteristicsUuids = command["characteristics"].to<JsonArray>();
   for (NimBLERemoteCharacteristic *characteristic : *characteristics)
   {
-    JsonObject charact = characteristicsUuids.createNestedObject();
+    JsonObject charact = characteristicsUuids.add<JsonObject>();
     NimBLEUUID chrUuid = characteristic->getUUID();
     charact["uuid"] = chrUuid.to128().toString();
-    JsonArray properties = charact.createNestedArray("properties");
+    JsonArray properties = charact["properties"].to<JsonArray>();
     if (characteristic->canRead())
     {
       properties.add("read");
@@ -585,7 +601,7 @@ void NobleApi::sendCharacteristicValue(
     std::string value,
     bool isNotification)
 {
-  StaticJsonDocument<384> command;
+  JsonDocument command;
   command["type"] = "read";
   command["peripheralUuid"] = BLEApi::idToString(id);
   command["serviceUuid"] = service;
@@ -611,7 +627,7 @@ void NobleApi::sendCharacteristicNotification(
     std::string characteristic,
     bool state)
 {
-  StaticJsonDocument<256> command;
+  JsonDocument command;
   command["type"] = "notify";
   command["peripheralUuid"] = BLEApi::idToString(id);
   command["serviceUuid"] = service;
@@ -622,7 +638,7 @@ void NobleApi::sendCharacteristicNotification(
 
 void NobleApi::sendCharacteristicWrite(const uint8_t client, BLEPeripheralID id, std::string service, std::string characteristic)
 {
-  StaticJsonDocument<256> command;
+  JsonDocument command;
   command["type"] = "write";
   command["peripheralUuid"] = BLEApi::idToString(id);
   command["serviceUuid"] = service;

@@ -33,6 +33,8 @@ private:
   static WebSocketsServer *ws;
   // static std::map<uint32_t, std::string> challenges;
   static Challenge challenges[WEBSOCKETS_SERVER_CLIENT_MAX];
+  // deadline (millis) by which a client must authenticate; 0 = none/authed
+  static uint32_t authDeadline[WEBSOCKETS_SERVER_CLIENT_MAX];
 
   static void clientDisconnectCleanup(uint8_t client);
   static bool clientCanConnect(uint8_t client, BLEPeripheralID id);

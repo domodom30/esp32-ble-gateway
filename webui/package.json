@@ -5,7 +5,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "deploy": "npm run build && del ..\\data\\index.html"
+    "deploy": "npm run build"
   },
   "dependencies": {
     "vue": "^3.4.0"

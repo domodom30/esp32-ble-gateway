@@ -9,6 +9,24 @@ bool WebManager::rebootRequired = false;
 bool WebManager::rebootNextLoop = false;
 uint8_t *WebManager::buffer = new uint8_t[ESP_GW_WEBSERVER_BUFFER_SIZE];
 
+// true if `s` is exactly `expectedLen` hexadecimal characters
+static bool isHexString(const char *s, size_t expectedLen)
+{
+  if (strlen(s) != expectedLen)
+  {
+    return false;
+  }
+  for (size_t i = 0; i < expectedLen; i++)
+  {
+    char c = s[i];
+    if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')))
+    {
+      return false;
+    }
+  }
+  return true;
+}
+
 bool WebManager::init()
 {
   if (!initCertificate())
@@ -23,6 +41,7 @@ bool WebManager::init()
   serverSecure->registerNode(new ResourceNode("/config", "GET", handleConfigGet));
   serverSecure->registerNode(new ResourceNode("/config", "POST", handleConfigSet));
   serverSecure->registerNode(new ResourceNode("/factoryReset", "GET", handleFactoryReset));
+  serverSecure->registerNode(new ResourceNode("/restart", "GET", handleRestart));
   serverSecure->setDefaultNode(new ResourceNode("", "", handleNotFound));
   serverSecure->start();
 
@@ -148,7 +167,7 @@ void WebManager::handleConfigGet(HTTPRequest *req, HTTPResponse *res)
   res->setHeader("Content-Type", "application/json");
   res->setHeader("Connection", "close");
 
-  StaticJsonDocument<512> config;
+  JsonDocument config;
   config["name"] = GwSettings::getName();
   config["login"] = GwSettings::getLogin();
 
@@ -163,6 +182,7 @@ void WebManager::handleConfigGet(HTTPRequest *req, HTTPResponse *res)
   }
 
   config["aes_key"] = GwSettings::getAes();
+  config["ble_token"] = GwSettings::getBleToken();
 
   // Static IP (empty strings if not configured)
   config["static_ip"] = GwSettings::getStaticIp() ? GwSettings::getStaticIp() : "";
@@ -201,7 +221,7 @@ void WebManager::handleConfigSet(HTTPRequest *req, HTTPResponse *res)
 
   buffer[idx + 1] = '\0';
 
-  StaticJsonDocument<512> config;
+  JsonDocument config;
   DeserializationError error = deserializeJson(config, buffer, idx + 1);
 
   if (error != DeserializationError::Ok)
@@ -211,6 +231,18 @@ void WebManager::handleConfigSet(HTTPRequest *req, HTTPResponse *res)
     res->setStatusCode(400);
     res->setStatusText("Invalid JSON format");
     res->println("400 Invalid JSON format");
+    return;
+  }
+
+  // Reject an invalid AES key before applying any change (atomic)
+  const char *aesKeyCheck = config["aes_key"];
+  if (aesKeyCheck && strlen(aesKeyCheck) > 0 && !isHexString(aesKeyCheck, BLOCK_SIZE * 2))
+  {
+    Serial.println("Invalid AES key");
+    res->setStatusCode(400);
+    res->setStatusText("Invalid AES key");
+    res->setHeader("Content-Type", "text/plain");
+    res->println("400 Invalid AES key (expected 32 hex chars)");
     return;
   }
 
@@ -282,6 +314,22 @@ void WebManager::handleConfigSet(HTTPRequest *req, HTTPResponse *res)
     rebootRequired = true;
   }
 
+  const char *bleToken = config["ble_token"];
+  if (bleToken && strlen(bleToken) > 0)
+  {
+    Serial.println("Setting new BLE token");
+    GwSettings::setBleToken(bleToken, strlen(bleToken) + 1);
+    rebootRequired = true;
+  }
+
+  const char *aesKey = config["aes_key"];
+  if (aesKey && strlen(aesKey) > 0)
+  {
+    Serial.println("Setting new AES key");
+    GwSettings::setAes(aesKey, strlen(aesKey) + 1);
+    rebootRequired = true;
+  }
+
   res->setHeader("Content-Type", "text/plain");
   res->setStatusCode(200);
   res->setStatusText("OK");
@@ -304,6 +352,18 @@ void WebManager::handleFactoryReset(HTTPRequest *req, HTTPResponse *res)
   res->print("OK");
 
   Serial.println("Rebooting");
+  rebootRequired = true;
+}
+
+void WebManager::handleRestart(HTTPRequest *req, HTTPResponse *res)
+{
+  res->setHeader("Content-Type", "text/plain");
+  res->setHeader("Connection", "close");
+  res->setStatusCode(200);
+  res->setStatusText("OK");
+  res->print("OK");
+
+  Serial.println("Restart requested via web");
   rebootRequired = true;
 }
 
