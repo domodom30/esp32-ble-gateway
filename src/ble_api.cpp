@@ -11,8 +11,14 @@ BLECharacteristicNotification BLEApi::_cbOnCharacteristicNotification = nullptr;
 NimBLEScanCallbacks *BLEApi::_advertisedDeviceCallback = nullptr;
 NimBLEClientCallbacks *BLEApi::_clientCallback = nullptr;
 std::map<BLEPeripheralID, uint8_t> BLEApi::addressTypes;
+BLERadarEntry BLEApi::_radar[ESP_GW_RADAR_MAX];
+uint8_t BLEApi::_radarCount = 0;
 BLEConnection BLEApi::connections[MAX_CLIENT_CONNECTIONS];
 uint8_t BLEApi::activeConnections = 0;
+bool BLEApi::_scanRequested = false;
+bool BLEApi::_scanActiveMode = true;
+uint32_t BLEApi::_scanDuration = 0;
+volatile bool BLEApi::_bleBusy = false;
 
 class myAdvertisedDeviceCallbacks : public NimBLEScanCallbacks
 {
@@ -64,8 +70,8 @@ void BLEApi::init()
     // unités 0,625 ms). Scan quasi-continu (duty 90 %) pour une découverte
     // rapide des advertisements « newEvents ». Sûr car connect() stoppe le
     // scan avant toute connexion.
-    bleScan->setInterval(100); // ms
-    bleScan->setWindow(90);    // ms
+    bleScan->setInterval(ESP_GW_SCAN_INTERVAL); // ms
+    bleScan->setWindow(ESP_GW_SCAN_WINDOW);     // ms
     _clientCallback = new myClientCallbacks();
     // TODO: maybe do some pre-descovery to get address types of devices around us
     // in case ESP was rebooted and clients try to connect before doing a scan
@@ -88,9 +94,17 @@ bool BLEApi::isReady()
  */
 bool BLEApi::startScan(uint32_t duration, bool active)
 {
-  if (!_isReady || _isScanning)
+  if (!_isReady)
   {
     return false;
+  }
+  // record the desired scan state so it can be restored after a connect()
+  _scanRequested = true;
+  _scanActiveMode = active;
+  _scanDuration = duration;
+  if (_isScanning)
+  {
+    return true; // already scanning as desired
   }
   _isScanning = true;
   Serial.println("BLE Scan started");
@@ -101,9 +115,10 @@ bool BLEApi::startScan(uint32_t duration, bool active)
 }
 
 /**
- * Stop scanning for BLE devices
+ * Raw scan stop: stops the radio scan but leaves the desired-state flag
+ * untouched (used internally around connect()).
  */
-bool BLEApi::stopScan()
+bool BLEApi::stopScanInternal()
 {
   if (_isReady && _isScanning)
   {
@@ -115,6 +130,33 @@ bool BLEApi::stopScan()
     return true;
   }
   return false;
+}
+
+/**
+ * Stop scanning for BLE devices (caller-initiated: clears the desired state
+ * so it is NOT auto-resumed after the next connect()).
+ */
+bool BLEApi::stopScan()
+{
+  _scanRequested = false;
+  return stopScanInternal();
+}
+
+void BLEApi::pauseScanForConnect()
+{
+  // stop the radio scan but keep _scanRequested so it resumes afterwards
+  stopScanInternal();
+}
+
+void BLEApi::resumeScanIfRequested()
+{
+  if (_scanRequested && !_isScanning && _isReady)
+  {
+    _isScanning = true;
+    bleScan->setActiveScan(_scanActiveMode);
+    bleScan->start(_scanDuration * 1000, true);
+    Serial.println("BLE Scan resumed");
+  }
 }
 
 /**
@@ -151,7 +193,16 @@ bool BLEApi::connect(BLEPeripheralID id)
   {
     return true;
   }
-  BLEApi::stopScan();
+  if (_bleBusy)
+  {
+    // a connect attempt is already running (re-entrancy from a callback)
+    log_w("BLE busy, connect rejected");
+    return false;
+  }
+  _bleBusy = true;
+  // pause scanning only for the duration of this connect; other clients'
+  // discovery resumes automatically afterwards (does not clear _scanRequested)
+  pauseScanForConnect();
 
   // get MAC address from id
   NimBLEAddress address = addressFromId(id);
@@ -205,6 +256,9 @@ bool BLEApi::connect(BLEPeripheralID id)
     NimBLEDevice::deleteClient(peripheral);
     log_e("Could not connect to [%s][%d]\n", address.toString().c_str(), retry);
   }
+  // restore discovery for other clients if it was requested
+  resumeScanIfRequested();
+  _bleBusy = false;
   return connected;
 }
 
@@ -336,11 +390,81 @@ bool BLEApi::writeCharacteristic(BLEPeripheralID id, std::string service, std::s
  */
 void BLEApi::_onDeviceFoundProxy(const NimBLEAdvertisedDevice *advertisedDevice)
 {
-  addressTypes[idFromAddress(advertisedDevice->getAddress())] = advertisedDevice->getAddressType();
+  BLEPeripheralID devId = idFromAddress(advertisedDevice->getAddress());
+  // BLE privacy renouvelle les MAC aléatoires : sans borne ce cache croît
+  // indéfiniment et fragmente le tas. Les entrées ne servent que
+  // transitoirement à connect() et sont réapprises au prochain
+  // advertisement, donc une purge au plafond est sûre.
+  if (addressTypes.size() >= ESP_GW_ADDR_TYPE_CACHE_MAX &&
+      addressTypes.find(devId) == addressTypes.end())
+  {
+    addressTypes.clear();
+  }
+  addressTypes[devId] = advertisedDevice->getAddressType();
+  _radarUpsert(devId, (int8_t)advertisedDevice->getRSSI(), advertisedDevice->getName().c_str());
   if (_cbOnDeviceFound)
   {
-    _cbOnDeviceFound(const_cast<NimBLEAdvertisedDevice *>(advertisedDevice), idFromAddress(advertisedDevice->getAddress()));
+    _cbOnDeviceFound(const_cast<NimBLEAdvertisedDevice *>(advertisedDevice), devId);
   }
+}
+
+bool BLEApi::isScanning()
+{
+  return _isScanning;
+}
+
+uint8_t BLEApi::getRadar(const BLERadarEntry *&out)
+{
+  out = _radar;
+  return _radarCount;
+}
+
+// Insert/update a bounded radar entry (fixed array, no heap). Updates an
+// existing id in place; when full, evicts the oldest-seen entry. The name is
+// truncated and sanitized to printable ASCII so the JSON stays well-formed.
+void BLEApi::_radarUpsert(const BLEPeripheralID &id, int8_t rssi, const char *name)
+{
+  uint32_t now = millis();
+  uint8_t slot = _radarCount;
+  uint8_t oldestIdx = 0;
+  uint32_t oldestSeen = 0xFFFFFFFF;
+  for (uint8_t i = 0; i < _radarCount; i++)
+  {
+    if (_radar[i].id == id)
+    {
+      slot = i;
+      break;
+    }
+    if (_radar[i].lastSeen < oldestSeen)
+    {
+      oldestSeen = _radar[i].lastSeen;
+      oldestIdx = i;
+    }
+  }
+  if (slot == _radarCount)
+  {
+    if (_radarCount < ESP_GW_RADAR_MAX)
+    {
+      _radarCount++;
+    }
+    else
+    {
+      slot = oldestIdx; // full: replace the least-recently-seen entry
+    }
+  }
+  _radar[slot].id = id;
+  _radar[slot].rssi = rssi;
+  _radar[slot].lastSeen = now;
+  uint8_t j = 0;
+  if (name != nullptr)
+  {
+    for (; name[j] != '\0' && j < ESP_GW_RADAR_NAME_MAX - 1; j++)
+    {
+      char c = name[j];
+      _radar[slot].name[j] = (c >= 0x20 && c < 0x7F) ? c : '?';
+    }
+  }
+  _radar[slot].name[j] = '\0';
 }
 
 /**
@@ -467,12 +591,10 @@ NimBLEAddress BLEApi::addressFromId(BLEPeripheralID id)
 
 std::string BLEApi::idToString(BLEPeripheralID id)
 {
-  auto size = ESP_BD_ADDR_LEN * 2 + 1;
-  char *res = (char *)malloc(size);
-  snprintf(res, size, "%02x%02x%02x%02x%02x%02x", id[5], id[4], id[3], id[2], id[1], id[0]);
-  std::string ret(res);
-  free(res);
-  return ret;
+  // stack buffer instead of malloc/free: this is a hot path (every advertisement)
+  char res[ESP_BD_ADDR_LEN * 2 + 1];
+  snprintf(res, sizeof(res), "%02x%02x%02x%02x%02x%02x", id[5], id[4], id[3], id[2], id[1], id[0]);
+  return std::string(res);
 }
 
 BLEPeripheralID BLEApi::idFromString(const char *idStr)

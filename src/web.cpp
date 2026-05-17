@@ -1,4 +1,7 @@
 #include "web.h"
+#include <Update.h>
+#include "noble_api.h"
+#include "ble_api.h"
 
 HTTPServer *WebManager::server = nullptr;
 uint8_t *WebManager::certData = nullptr;
@@ -27,6 +30,42 @@ static bool isHexString(const char *s, size_t expectedLen)
   return true;
 }
 
+// true if `s` is a syntactically valid dotted-quad IPv4 address
+static bool isValidIPv4(const char *s)
+{
+  if (s == nullptr)
+  {
+    return false;
+  }
+  for (int part = 0; part < 4; part++)
+  {
+    if (*s < '0' || *s > '9')
+    {
+      return false; // each octet must start with a digit
+    }
+    int value = 0;
+    int digits = 0;
+    while (*s >= '0' && *s <= '9')
+    {
+      value = value * 10 + (*s - '0');
+      if (++digits > 3 || value > 255)
+      {
+        return false;
+      }
+      s++;
+    }
+    if (part < 3)
+    {
+      if (*s != '.')
+      {
+        return false;
+      }
+      s++;
+    }
+  }
+  return *s == '\0';
+}
+
 bool WebManager::init()
 {
   if (!initCertificate())
@@ -42,6 +81,8 @@ bool WebManager::init()
   serverSecure->registerNode(new ResourceNode("/config", "POST", handleConfigSet));
   serverSecure->registerNode(new ResourceNode("/factoryReset", "GET", handleFactoryReset));
   serverSecure->registerNode(new ResourceNode("/restart", "GET", handleRestart));
+  serverSecure->registerNode(new ResourceNode("/update", "POST", handleOtaUpdate));
+  serverSecure->registerNode(new ResourceNode("/radar", "GET", handleRadarGet));
   serverSecure->setDefaultNode(new ResourceNode("", "", handleNotFound));
   serverSecure->start();
 
@@ -246,6 +287,34 @@ void WebManager::handleConfigSet(HTTPRequest *req, HTTPResponse *res)
     return;
   }
 
+  // Reject an incomplete/invalid static IP set before applying anything.
+  // Partial/invalid static config bricks the device (unreachable, no AP
+  // fallback once associated), so enforce all-or-nothing here (atomic).
+  {
+    const char *sipChk = config["static_ip"];
+    const char *smskChk = config["static_mask"];
+    const char *sgwChk = config["static_gw"];
+    const char *sdnsChk = config["static_dns"];
+    bool ipSet = sipChk && strlen(sipChk) > 0;
+    bool mskSet = smskChk && strlen(smskChk) > 0;
+    bool gwSet = sgwChk && strlen(sgwChk) > 0;
+    bool dnsSet = sdnsChk && strlen(sdnsChk) > 0;
+    if (ipSet || mskSet || gwSet)
+    {
+      if (!(ipSet && mskSet && gwSet) ||
+          !isValidIPv4(sipChk) || !isValidIPv4(smskChk) || !isValidIPv4(sgwChk) ||
+          (dnsSet && !isValidIPv4(sdnsChk)))
+      {
+        Serial.println("Invalid static IP configuration");
+        res->setStatusCode(400);
+        res->setStatusText("Invalid static IP");
+        res->setHeader("Content-Type", "text/plain");
+        res->println("400 Invalid static IP (need valid ip+mask+gw, or leave all empty for DHCP)");
+        return;
+      }
+    }
+  }
+
   Serial.println("Checking for config changes");
 
   const char *name = config["name"];
@@ -364,6 +433,129 @@ void WebManager::handleRestart(HTTPRequest *req, HTTPResponse *res)
   res->print("OK");
 
   Serial.println("Restart requested via web");
+  rebootRequired = true;
+}
+
+// Bluetooth radar: keep a scan alive while the UI polls and stream the
+// bounded, currently-nearby device list as JSON (no large buffer).
+void WebManager::handleRadarGet(HTTPRequest *req, HTTPResponse *res)
+{
+  NobleApi::radarKeepAlive();
+
+  res->setHeader("Content-Type", "application/json");
+  res->setHeader("Connection", "close");
+  res->setStatusCode(200);
+  res->setStatusText("OK");
+
+  const BLERadarEntry *list = nullptr;
+  uint8_t count = BLEApi::getRadar(list);
+  uint32_t now = millis();
+
+  res->print("[");
+  bool first = true;
+  for (uint8_t i = 0; i < count; i++)
+  {
+    uint32_t age = now - list[i].lastSeen;
+    if (age >= ESP_GW_RADAR_TTL_MS)
+    {
+      continue; // stale: not currently nearby
+    }
+    if (!first)
+    {
+      res->print(",");
+    }
+    first = false;
+    res->print("{\"id\":\"");
+    res->print(BLEApi::idToString(list[i].id).c_str());
+    res->print("\",\"name\":\"");
+    for (const char *p = list[i].name; *p != '\0'; p++)
+    {
+      if (*p == '"' || *p == '\\')
+      {
+        res->print('\\');
+      }
+      res->print(*p);
+    }
+    res->print("\",\"rssi\":");
+    res->print((int)list[i].rssi);
+    res->print(",\"age\":");
+    res->print((unsigned long)age);
+    res->print("}");
+  }
+  res->print("]");
+}
+
+void WebManager::handleOtaUpdate(HTTPRequest *req, HTTPResponse *res)
+{
+  res->setHeader("Content-Type", "text/plain");
+  res->setHeader("Connection", "close");
+
+  size_t contentLength = req->getContentLength();
+  size_t freeSpace = ESP.getFreeSketchSpace();
+
+  // refuse empty uploads or images larger than the inactive OTA slot
+  if (contentLength == 0 || contentLength > freeSpace)
+  {
+    Serial.printf("OTA rejected: size=%u free=%u\n", (unsigned)contentLength, (unsigned)freeSpace);
+    res->setStatusCode(400);
+    res->setStatusText("Bad Request");
+    res->print("FAIL invalid firmware size");
+    return;
+  }
+
+  if (!Update.begin(contentLength))
+  {
+    Serial.printf("OTA begin failed: %s\n", Update.errorString());
+    res->setStatusCode(500);
+    res->setStatusText("Internal Server Error");
+    res->print("FAIL ");
+    res->print(Update.errorString());
+    return;
+  }
+
+  Serial.printf("OTA started: %u bytes\n", (unsigned)contentLength);
+
+  uint8_t otaBuffer[1024];
+  size_t written = 0;
+  while (!req->requestComplete())
+  {
+    size_t n = req->readBytes(otaBuffer, sizeof(otaBuffer));
+    if (n == 0)
+    {
+      break;
+    }
+    if (Update.write(otaBuffer, n) != n)
+    {
+      Serial.printf("OTA write failed: %s\n", Update.errorString());
+      Update.abort();
+      res->setStatusCode(500);
+      res->setStatusText("Internal Server Error");
+      res->print("FAIL ");
+      res->print(Update.errorString());
+      return;
+    }
+    written += n;
+  }
+
+  if (written != contentLength || !Update.end(true))
+  {
+    Serial.printf("OTA end failed (%u/%u): %s\n",
+                  (unsigned)written, (unsigned)contentLength, Update.errorString());
+    if (!Update.isFinished())
+    {
+      Update.abort();
+    }
+    res->setStatusCode(500);
+    res->setStatusText("Internal Server Error");
+    res->print("FAIL ");
+    res->print(Update.errorString());
+    return;
+  }
+
+  Serial.println("OTA success, rebooting");
+  res->setStatusCode(200);
+  res->setStatusText("OK");
+  res->print("OK");
   rebootRequired = true;
 }
 

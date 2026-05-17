@@ -15,6 +15,50 @@
 DNSServer *dnsServer = nullptr;
 bool connected = false;
 
+// Diagnostic: log the WiFi disconnect reason code (beacon timeout / auth /
+// 4-way handshake / coexistence) to pinpoint the root cause of instability.
+void onWifiEvent(WiFiEvent_t event, WiFiEventInfo_t info)
+{
+  if (event == ARDUINO_EVENT_WIFI_STA_DISCONNECTED)
+  {
+    Serial.printf("WiFi STA disconnected, reason=%d\n",
+                  info.wifi_sta_disconnected.reason);
+  }
+  else if (event == ARDUINO_EVENT_WIFI_STA_GOT_IP)
+  {
+    Serial.print("WiFi STA got IP: ");
+    Serial.println(WiFi.localIP());
+  }
+}
+
+// Apply the configured static IP. Returns true only if a valid static config
+// was applied; on any malformed field it logs and returns false (caller stays
+// on DHCP) instead of pushing 0.0.0.0 into the IP stack — which would
+// associate but be unreachable, locking the device out. Reused by setup and
+// the runtime watchdog so a reconnect keeps the same address.
+static bool applyStaticIp()
+{
+  if (!GwSettings::hasStaticIp())
+  {
+    return false;
+  }
+  IPAddress ip, mask, gw, dns;
+  if (!ip.fromString(GwSettings::getStaticIp()) ||
+      !mask.fromString(GwSettings::getStaticMask()) ||
+      !gw.fromString(GwSettings::getStaticGw()))
+  {
+    Serial.println("WARNING: malformed static IP config, falling back to DHCP");
+    return false;
+  }
+  // DNS is optional: fall back to the gateway as resolver if absent/invalid.
+  if (!dns.fromString(GwSettings::getStaticDns()))
+  {
+    dns = gw;
+  }
+  WiFi.config(ip, gw, mask, dns);
+  return true;
+}
+
 bool setupWifi()
 {
   // wifi logic:
@@ -29,14 +73,8 @@ bool setupWifi()
     Serial.printf("Connecting to configured WiFi [%s]\n", GwSettings::getSsid());
     WiFi.mode(WIFI_STA);
 
-    if (GwSettings::hasStaticIp())
+    if (applyStaticIp())
     {
-      IPAddress ip, mask, gw, dns;
-      ip.fromString(GwSettings::getStaticIp());
-      mask.fromString(GwSettings::getStaticMask());
-      gw.fromString(GwSettings::getStaticGw());
-      dns.fromString(GwSettings::getStaticDns());
-      WiFi.config(ip, gw, mask, dns);
       Serial.printf("Static IP configured: %s\n", GwSettings::getStaticIp());
     }
 
@@ -54,16 +92,32 @@ bool setupWifi()
       wifiRetry--;
     } while (wifiResult != WL_CONNECTED && wifiRetry > 0);
 
-    if (wifiResult == WL_CONNECTED)
+    // WL_CONNECTED only means *association* succeeded. Require a usable IP
+    // (DHCP lease obtained, or valid static) before declaring success —
+    // otherwise an associated-but-unreachable device would skip the AP
+    // fallback and lock the user out permanently.
+    if (wifiResult == WL_CONNECTED && (uint32_t)WiFi.localIP() != 0)
     {
       Serial.print("IP Address: ");
       Serial.println(WiFi.localIP());
       WiFi.setAutoReconnect(true);
+      // NOTE: do NOT call WiFi.setSleep(false) here. WIFI_PS_NONE is
+      // incompatible with the ESP32 WiFi/BLE software coexistence and makes
+      // esp_bt_controller_enable() abort in coex_core_enable() when NimBLE
+      // starts (boot loop). Keep the Arduino default WIFI_PS_MIN_MODEM.
+      // BLE-scan-induced beacon misses are tuned via ESP_GW_SCAN_*, not here.
       connected = true;
       return true;
     }
 
-    Serial.printf("Failed to connect to configured WiFi [%s]\n", GwSettings::getSsid());
+    if (wifiResult == WL_CONNECTED)
+    {
+      Serial.println("WiFi associated but no usable IP (no DHCP lease / bad static IP) — falling back to AP");
+    }
+    else
+    {
+      Serial.printf("Failed to connect to configured WiFi [%s]\n", GwSettings::getSsid());
+    }
   }
 
   // no credentials or connect failed, setup AP
@@ -91,6 +145,7 @@ void setup()
   // esp_log_level_set("*", ESP_LOG_VERBOSE);
   GwSettings::init();
 
+  WiFi.onEvent(onWifiEvent);
   setupWifi();
 
   setupWeb();
@@ -127,28 +182,35 @@ void setup()
   meminfo();
 }
 
-// Non-blocking WiFi watchdog: in STA mode, periodically check the link and
-// trigger a reconnect with back-off if it dropped. Never blocks the loop.
+// Non-blocking WiFi watchdog. setAutoReconnect(true) already recovers brief
+// drops on its own; this only forces a hard reconnect after a sustained
+// outage (~30 s) so it never tears down a recovery already in progress, and
+// re-applies the static IP so the gateway keeps the same address.
 void maintainWifi()
 {
   static uint32_t lastCheck = 0;
-  static uint32_t lastReconnect = 0;
+  static uint8_t failedChecks = 0;
   uint32_t now = millis();
   if (now - lastCheck < 10000)
   {
     return;
   }
   lastCheck = now;
+
   if (WiFi.status() == WL_CONNECTED)
+  {
+    failedChecks = 0;
+    return;
+  }
+
+  // Let the built-in auto-reconnect try for ~30 s before intervening.
+  if (++failedChecks < 3)
   {
     return;
   }
-  if (lastReconnect != 0 && now - lastReconnect < 15000)
-  {
-    return; // back-off between attempts
-  }
-  lastReconnect = now;
-  Serial.println("WiFi disconnected, attempting reconnect");
+  failedChecks = 0;
+  Serial.println("WiFi down >30s, forcing reconnect");
+  applyStaticIp();
   WiFi.disconnect();
   WiFi.begin(GwSettings::getSsid(), GwSettings::getPass());
 }
@@ -166,4 +228,13 @@ void loop()
   }
   NobleApi::loop();
   WebManager::loop();
+
+  // periodic heap/fragmentation sample for diagnostics
+  static uint32_t lastMemLog = 0;
+  uint32_t nowMs = millis();
+  if (nowMs - lastMemLog >= 30000)
+  {
+    lastMemLog = nowMs;
+    meminfo();
+  }
 }

@@ -9,6 +9,7 @@ uint32_t NobleApi::authDeadline[WEBSOCKETS_SERVER_CLIENT_MAX];
 #define AUTH_TIMEOUT_MS 10000
 PeripheralClient NobleApi::peripheralConnections[MAX_CLIENT_CONNECTIONS];
 uint8_t NobleApi::activeConnections = 0;
+uint32_t NobleApi::webScanUntil = 0;
 
 bool isEmptyChallenge(Challenge challenge)
 {
@@ -88,6 +89,28 @@ void NobleApi::loop()
         authDeadline[client] = 0;
       }
     }
+
+    // Expire a web-driven (radar) scan: once the UI stopped polling and no
+    // noble client is connected, stop scanning so we don't scan forever.
+    if (webScanUntil != 0 && now > webScanUntil)
+    {
+      webScanUntil = 0;
+      if (ws->connectedClients() == 0)
+      {
+        BLEApi::stopScan();
+      }
+    }
+  }
+}
+
+// Keep a BLE scan alive for the web radar even if no noble client is
+// connected. Called on each /radar poll; auto-expires via loop().
+void NobleApi::radarKeepAlive()
+{
+  webScanUntil = millis() + ESP_GW_RADAR_KEEPALIVE_MS;
+  if (!BLEApi::isScanning())
+  {
+    BLEApi::startScan(0, true);
   }
 }
 
@@ -148,7 +171,7 @@ void NobleApi::onWsEvent(uint8_t client, WStype_t type, uint8_t *payload, size_t
   {
     clientDisconnectCleanup(client);
     Serial.printf("[%u] Disconnected!\n", client);
-    if (ws->connectedClients() == 0)
+    if (ws->connectedClients() == 0 && millis() > webScanUntil)
     {
       BLEApi::stopScan();
     }

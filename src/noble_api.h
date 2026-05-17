@@ -26,9 +26,14 @@ class NobleApi
 public:
   static bool init();
   static void loop();
+  // Web "radar": keep a BLE scan alive (even with no noble client) while the
+  // UI keeps polling; auto-expires so the scan stops when polling stops.
+  static void radarKeepAlive();
 
 private:
   static bool ready;
+  // millis() until which a web-driven scan must be kept alive (0 = none)
+  static uint32_t webScanUntil;
   static Security *sec;
   static WebSocketsServer *ws;
   // static std::map<uint32_t, std::string> challenges;
