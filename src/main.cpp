@@ -12,6 +12,15 @@
 #define WIFI_CONNECT_RETRY 5
 #define WIFI_CONFIGURE_DNS_PORT 53
 
+// Pile de la tâche Arduino loop = 16 Ko. NE PAS utiliser
+// -DCONFIG_ARDUINO_LOOP_STACK_SIZE : le sdkconfig.h du framework le redéfinit
+// à 8192 après le define ligne de commande, donc le flag est silencieusement
+// ignoré. SET_LOOP_TASK_STACK_SIZE (Arduino.h) définit un
+// getArduinoLoopTaskStackSize() fort qui écrase le faible — immunisé contre la
+// collision. Marge nécessaire : sérialisation JSON en VLA pile (noble_api.cpp)
+// + callbacks NimBLE / HTTPS.
+SET_LOOP_TASK_STACK_SIZE(16 * 1024);
+
 DNSServer *dnsServer = nullptr;
 bool connected = false;
 

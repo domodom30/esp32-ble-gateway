@@ -46,7 +46,10 @@ public:
   void onDisconnect(NimBLEClient *pClient, int reason)
   {
     BLEPeripheralID id = BLEApi::idFromAddress(pClient->getPeerAddress());
-    Serial.printf("***** Disconnected from ==%s==\n", pClient->getPeerAddress().toString().c_str());
+    // reason : code NimBLE 2.x (ex. BLE_HS_ETIMEOUT = timeout de supervision /
+    // coexistence radio, terminaison distante, erreur contrôleur) — loggé pour
+    // diagnostiquer les coupures en plein handshake TTLock.
+    Serial.printf("***** Disconnected from ==%s== reason=%d\n", pClient->getPeerAddress().toString().c_str(), reason);
     BLEApi::_onDeviceInteractionProxy(id, false);
   }
 
@@ -150,7 +153,12 @@ void BLEApi::pauseScanForConnect()
 
 void BLEApi::resumeScanIfRequested()
 {
-  if (_scanRequested && !_isScanning && _isReady)
+  // Arbitrage radio : ne JAMAIS relancer le scan tant qu'une connexion GATT
+  // est active. Sur la radio unique de l'ESP32 (+ coexistence WiFi 2,4 GHz),
+  // un scan ~90 % de duty cycle affame les connection events et fait tomber le
+  // lien en plein handshake TTLock (No response to checkAdmin). Le scan ne
+  // reprend qu'à la dernière déconnexion (activeConnections == 0).
+  if (_scanRequested && !_isScanning && _isReady && activeConnections == 0)
   {
     _isScanning = true;
     bleScan->setActiveScan(_scanActiveMode);
@@ -216,8 +224,11 @@ bool BLEApi::connect(BLEPeripheralID id)
   // trames de 20 octets (une trame par intervalle de connexion), donc un
   // intervalle court accélère nettement les longues séquences (lecture du
   // journal). Unités : 1,25 ms pour les intervalles, 10 ms pour la
-  // supervision → 12 = 15 ms, latency 0, timeout 200 = 2000 ms.
-  peripheral->setConnectionParams(12, 12, 0, 200);
+  // supervision → 12 = 15 ms, latency 0, timeout 600 = 6000 ms.
+  // Supervision portée de 2 s à 6 s : sous contention radio, 2 s sans paquet
+  // coupaient le lien en plein handshake admin TTLock (No response to
+  // checkAdmin). Si l'instabilité persiste, relâcher le max : (12, 24, 0, 600).
+  peripheral->setConnectionParams(12, 12, 0, 600);
   do
   {
     // TODO: sometimes the connect fails and remains hanging in the semaphore, patch BLE lib ?
@@ -240,8 +251,8 @@ bool BLEApi::connect(BLEPeripheralID id)
       // delete peripheral;
       if (retry > 0)
       {
-        log_i("Retry connection in 1s");
-        vTaskDelay(1000 / portTICK_PERIOD_MS);
+        log_i("Retry connection in 500ms");
+        vTaskDelay(500 / portTICK_PERIOD_MS);
       }
     }
   } while (!connected && retry > 0);
@@ -492,10 +503,13 @@ void BLEApi::_onDeviceInteractionProxy(BLEPeripheralID id, bool connected)
       {
         _cbOnDeviceDisconnected(id);
       }
-      vTaskDelay(1000 / portTICK_PERIOD_MS);
+      vTaskDelay(200 / portTICK_PERIOD_MS);
       Serial.println("Dealocating memory");
       NimBLEDevice::deleteClient(peripheral);
       meminfo();
+      // Connexion fermée : si c'était la dernière (activeConnections == 0) et
+      // qu'un scan était demandé, la découverte BLE peut reprendre.
+      resumeScanIfRequested();
     }
   }
 }

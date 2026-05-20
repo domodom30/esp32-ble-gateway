@@ -11,7 +11,7 @@
         </span>
         <div class="brand-text">
           <div class="brand-name">Gateway Bluetooth</div>
-          <div class="brand-sub">{{ name || 'BLE Gateway' }}</div>
+          <div class="brand-sub">v{{ version }}</div>
         </div>
       </div>
 
@@ -305,6 +305,7 @@
 
 <script setup>
 import { ref, reactive, computed, onMounted, watch, onBeforeUnmount } from 'vue'
+import { version } from '../package.json'
 
 const REQUEST_TIMEOUT = 8000
 const THEME_KEY = 'ttlock_theme'

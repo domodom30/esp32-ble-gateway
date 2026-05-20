@@ -1,9 +1,12 @@
 import { defineConfig } from 'vite';
 import { rmSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { resolve, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import vue from '@vitejs/plugin-vue';
 import { viteSingleFile } from 'vite-plugin-singlefile';
 import { compression } from 'vite-plugin-compression2';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
 
 const OUT_DIR = '../data';
 
