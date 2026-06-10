@@ -8,6 +8,8 @@
 
 > _Fork of [kind3r/esp32-ble-gateway](https://github.com/kind3r/esp32-ble-gateway) with modernized stack and new features._
 
+[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/A1V11ZZTPI)
+
 ---
 
 ## Overview
