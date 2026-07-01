@@ -2,6 +2,11 @@
 #include <Update.h>
 #include "noble_api.h"
 #include "ble_api.h"
+#include "web_ui.h"
+
+// Fenêtre laissée aux boucles serveur pour flusher la réponse TLS ("OK") vers le
+// client avant de couper la radio et rebooter (évite les faux « erreur réseau »).
+#define ESP_GW_REBOOT_FLUSH_MS 700
 
 HTTPServer *WebManager::server = nullptr;
 uint8_t *WebManager::certData = nullptr;
@@ -9,7 +14,7 @@ uint8_t *WebManager::pkData = nullptr;
 SSLCert *WebManager::cert = nullptr;
 HTTPSServer *WebManager::serverSecure = nullptr;
 bool WebManager::rebootRequired = false;
-bool WebManager::rebootNextLoop = false;
+uint32_t WebManager::rebootAt = 0;
 uint8_t *WebManager::buffer = new uint8_t[ESP_GW_WEBSERVER_BUFFER_SIZE];
 
 // true if `s` is exactly `expectedLen` hexadecimal characters
@@ -81,8 +86,8 @@ bool WebManager::init()
   serverSecure->registerNode(new ResourceNode("/config", "POST", handleConfigSet));
   serverSecure->registerNode(new ResourceNode("/factoryReset", "GET", handleFactoryReset));
   serverSecure->registerNode(new ResourceNode("/restart", "GET", handleRestart));
+  serverSecure->registerNode(new ResourceNode("/update/prepare", "GET", handleOtaPrepare));
   serverSecure->registerNode(new ResourceNode("/update", "POST", handleOtaUpdate));
-  serverSecure->registerNode(new ResourceNode("/radar", "GET", handleRadarGet));
   serverSecure->setDefaultNode(new ResourceNode("", "", handleNotFound));
   serverSecure->start();
 
@@ -100,17 +105,40 @@ bool WebManager::init()
 
 void WebManager::loop()
 {
-  if (rebootRequired)
-  {
-    // delay the reboot one more loop
-    if (rebootNextLoop)
-    {
-      ESP.restart();
-    }
-    rebootNextLoop = true;
-  }
   server->loop();
   serverSecure->loop();
+  if (rebootRequired)
+  {
+    // Laisser les boucles serveur ci-dessus vider la réponse TLS ("OK") vers le
+    // client AVANT de couper la radio, sinon le navigateur voit la connexion
+    // tomber et croit l'action échouée.
+    if (rebootAt == 0)
+    {
+      rebootAt = millis() + ESP_GW_REBOOT_FLUSH_MS;
+    }
+    else if (millis() >= rebootAt)
+    {
+      restartClean();
+    }
+  }
+}
+
+// See declaration: stop the radios before esp_restart() so the next boot
+// starts from a clean coexistence state and the device reboots on its own.
+void WebManager::restartClean()
+{
+  Serial.println("Clean restart: stopping radios");
+  // BLE may already be deinited (OTA prepare path); guard so we never
+  // double-deinit. For a config-save reboot the stack is still up here.
+  if (NimBLEDevice::isInitialized())
+  {
+    BLEApi::stopScan();
+    NimBLEDevice::deinit(true);
+  }
+  // wifioff=true, keep stored credentials (eraseap=false)
+  WiFi.disconnect(true, false);
+  delay(100);
+  ESP.restart();
 }
 
 bool WebManager::initCertificate()
@@ -189,18 +217,12 @@ void WebManager::handleHome(HTTPRequest *req, HTTPResponse *res)
   res->setHeader("Content-Type", "text/html");
   res->setHeader("Content-Encoding", "gzip");
 
-  SPIFFS.begin();
-  File file = SPIFFS.open("/index.html.gz", "r");
-  size_t length = 0;
-  do
-  {
-    length = file.read(buffer, ESP_GW_WEBSERVER_BUFFER_SIZE);
-    res->write(buffer, length);
-  } while (length > 0);
-  file.close();
-  SPIFFS.end();
-
-  meminfo();
+  // Servi depuis la flash mémoire-mappée (cache/XIP), pas SPIFFS : lire la page
+  // via SPIFFS déclenchait un spi_flash_read qui, sous WiFi/TLS/coex actifs,
+  // deadlockait la désactivation du cache inter-cœurs et figeait la tâche loop()
+  // (web mort, ping vivant) jusqu'à un débranchement. Un simple write mémoire ne
+  // peut pas bloquer ainsi. La page est régénérée par tools/gen_web_ui.py.
+  res->write(INDEX_HTML_GZ, INDEX_HTML_GZ_LEN);
 }
 
 void WebManager::handleConfigGet(HTTPRequest *req, HTTPResponse *res)
@@ -436,53 +458,28 @@ void WebManager::handleRestart(HTTPRequest *req, HTTPResponse *res)
   rebootRequired = true;
 }
 
-// Bluetooth radar: keep a scan alive while the UI polls and stream the
-// bounded, currently-nearby device list as JSON (no large buffer).
-void WebManager::handleRadarGet(HTTPRequest *req, HTTPResponse *res)
+// Prépare l'appareil pour l'OTA : la connexion TLS coûte ~65 Ko de heap et le
+// transfert soutenu de ~1,5 Mo affame lwIP (allocation des pbuf) — l'upload gèle
+// alors vers ~35 %. On libère la pile NimBLE résidente (~30-50 Ko) AVANT le POST,
+// via cette requête légère qui, elle, passe même avec peu de heap. Le BLE sera
+// réinitialisé au prochain boot (NobleApi::init), juste après le reboot post-OTA.
+void WebManager::handleOtaPrepare(HTTPRequest *req, HTTPResponse *res)
 {
-  NobleApi::radarKeepAlive();
-
-  res->setHeader("Content-Type", "application/json");
+  res->setHeader("Content-Type", "text/plain");
   res->setHeader("Connection", "close");
+
+  Serial.println("OTA prepare: freeing BLE stack");
+  meminfo();
+
+  // Quiescer la radio puis libérer toute la pile Bluetooth.
+  BLEApi::stopScan();
+  NimBLEDevice::deinit(true);
+
+  meminfo();
+
   res->setStatusCode(200);
   res->setStatusText("OK");
-
-  const BLERadarEntry *list = nullptr;
-  uint8_t count = BLEApi::getRadar(list);
-  uint32_t now = millis();
-
-  res->print("[");
-  bool first = true;
-  for (uint8_t i = 0; i < count; i++)
-  {
-    uint32_t age = now - list[i].lastSeen;
-    if (age >= ESP_GW_RADAR_TTL_MS)
-    {
-      continue; // stale: not currently nearby
-    }
-    if (!first)
-    {
-      res->print(",");
-    }
-    first = false;
-    res->print("{\"id\":\"");
-    res->print(BLEApi::idToString(list[i].id).c_str());
-    res->print("\",\"name\":\"");
-    for (const char *p = list[i].name; *p != '\0'; p++)
-    {
-      if (*p == '"' || *p == '\\')
-      {
-        res->print('\\');
-      }
-      res->print(*p);
-    }
-    res->print("\",\"rssi\":");
-    res->print((int)list[i].rssi);
-    res->print(",\"age\":");
-    res->print((unsigned long)age);
-    res->print("}");
-  }
-  res->print("]");
+  res->print("OK");
 }
 
 void WebManager::handleOtaUpdate(HTTPRequest *req, HTTPResponse *res)
@@ -522,7 +519,11 @@ void WebManager::handleOtaUpdate(HTTPRequest *req, HTTPResponse *res)
     size_t n = req->readBytes(otaBuffer, sizeof(otaBuffer));
     if (n == 0)
     {
-      break;
+      // readBytes est non bloquant (select() timeout 0) : 0 = pas encore de
+      // donnees, pas fin de flux. Ceder la main (WDT/coex WiFi-BLE) et retenter,
+      // sinon un break premature avorte l'upload (blocage a ~35%).
+      delay(1);
+      continue;
     }
     if (Update.write(otaBuffer, n) != n)
     {
@@ -535,6 +536,9 @@ void WebManager::handleOtaUpdate(HTTPRequest *req, HTTPResponse *res)
       return;
     }
     written += n;
+    // Ceder la main a chaque iteration : l'ecriture flash soutenue monopolise
+    // le core et affamerait la tache IDLE (Task Watchdog) sans ce yield.
+    delay(0);
   }
 
   if (written != contentLength || !Update.end(true))

@@ -12,7 +12,8 @@ class Security {
     ~Security();
     void setKey(const char *aesKey);
     void getKey(uint8_t *aesKey);
-    void generateIV(uint8_t IV[BLOCK_SIZE]);
+    // Writes BLOCK_SIZE hex chars + NUL: caller buffer must be BLOCK_SIZE + 1.
+    void generateIV(uint8_t IV[BLOCK_SIZE + 1]);
     size_t getPadedSize(size_t dataLength);
     size_t encrypt(const uint8_t IV[BLOCK_SIZE], const uint8_t *data, size_t dataLength, uint8_t *encrypted);
     size_t decrypt(const uint8_t IV[BLOCK_SIZE], const uint8_t *data, size_t dataLength, uint8_t *decrypted);

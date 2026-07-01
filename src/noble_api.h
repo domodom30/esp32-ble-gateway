@@ -9,6 +9,9 @@
 
 #include <WebSocketsServer.h>
 #include <ArduinoJson.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/queue.h>
+#include <freertos/task.h>
 #include "gw_settings.h"
 #include "security.h"
 #include "ble_api.h"
@@ -19,27 +22,39 @@ struct PeripheralClient
   uint8_t client;
 };
 
-typedef uint8_t Challenge[BLOCK_SIZE];
+// 16 ASCII-hex characters used as the AES IV, plus a trailing NUL.
+// Must be BLOCK_SIZE + 1: generateIV() writes the NUL at index BLOCK_SIZE.
+typedef uint8_t Challenge[BLOCK_SIZE + 1];
 
 class NobleApi
 {
 public:
   static bool init();
   static void loop();
-  // Web "radar": keep a BLE scan alive (even with no noble client) while the
-  // UI keeps polling; auto-expires so the scan stops when polling stops.
-  static void radarKeepAlive();
 
 private:
   static bool ready;
-  // millis() until which a web-driven scan must be kept alive (0 = none)
-  static uint32_t webScanUntil;
   static Security *sec;
   static WebSocketsServer *ws;
   // static std::map<uint32_t, std::string> challenges;
   static Challenge challenges[WEBSOCKETS_SERVER_CLIENT_MAX];
   // deadline (millis) by which a client must authenticate; 0 = none/authed
   static uint32_t authDeadline[WEBSOCKETS_SERVER_CLIENT_MAX];
+
+  // All WebSocket writes are funnelled through txQueue and flushed only from
+  // the loop task (drainTx), so ws->sendTXT is never called concurrently from
+  // the NimBLE host task / connect worker.
+  static QueueHandle_t txQueue;
+  // Blocking BLEApi::connect() is offloaded to connWorker (fed by connReqQueue)
+  // so the loop task — and thus the WebSocket — stays responsive. Results come
+  // back via connResQueue and are handled in the loop task (drainConnResults).
+  static QueueHandle_t connReqQueue;
+  static QueueHandle_t connResQueue;
+  static TaskHandle_t connWorkerTask;
+  static void enqueueTx(uint8_t client, char *payload); // takes ownership of payload
+  static void drainTx();
+  static void drainConnResults();
+  static void connWorker(void *arg);
 
   static void clientDisconnectCleanup(uint8_t client);
   static bool clientCanConnect(uint8_t client, BLEPeripheralID id);
@@ -62,7 +77,10 @@ private:
   static void onWsEvent(uint8_t client, WStype_t type, uint8_t *payload, size_t length);
   static void onBLEDeviceFound(NimBLEAdvertisedDevice *advertisedDevice, BLEPeripheralID id);
   static void onBLEDeviceDisconnected(BLEPeripheralID id);
-  static void onCharacteristicNotification(BLEPeripheralID id, std::string service, std::string characteristic, std::string data, bool isNotify);
+  static void onCharacteristicNotification(BLEPeripheralID id, const std::string &service, const std::string &characteristic, const std::string &data, bool isNotify);
+  // true if at least one WebSocket client is connected AND authenticated; used
+  // to skip building/serializing discover messages when nobody is listening.
+  static bool hasAuthenticatedClient();
 
   static PeripheralClient peripheralConnections[MAX_CLIENT_CONNECTIONS];
   static uint8_t activeConnections;

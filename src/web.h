@@ -23,8 +23,6 @@
 #include <HTTPRequest.hpp>
 #include <HTTPResponse.hpp>
 
-#include <SPIFFS.h>
-
 using namespace httpsserver;
 
 class WebManager {
@@ -38,19 +36,24 @@ class WebManager {
     static SSLCert * cert;
     static HTTPSServer *serverSecure;
     static bool rebootRequired;
-    static bool rebootNextLoop;
+    static uint32_t rebootAt;
     static uint8_t *buffer;
 
     static bool initCertificate();
     static void clearCertificate();
+    // Quiesce the radios (BLE + WiFi) before the software reset. A bare
+    // ESP.restart() with WiFi/BT still running can leave the coexistence
+    // hardware in a state the bootloader can't recover from without a power
+    // cycle ("obligé de débrancher l'ESP"); this makes the auto-reboot reliable.
+    static void restartClean();
     static void middlewareAuthentication(HTTPRequest * req, HTTPResponse * res, std::function<void()> next);
     static void handleHome(HTTPRequest * req, HTTPResponse * res);
     static void handleConfigGet(HTTPRequest * req, HTTPResponse * res);
     static void handleConfigSet(HTTPRequest * req, HTTPResponse * res);
     static void handleFactoryReset(HTTPRequest * req, HTTPResponse * res);
     static void handleRestart(HTTPRequest * req, HTTPResponse * res);
+    static void handleOtaPrepare(HTTPRequest * req, HTTPResponse * res);
     static void handleOtaUpdate(HTTPRequest * req, HTTPResponse * res);
-    static void handleRadarGet(HTTPRequest * req, HTTPResponse * res);
     static void handleRedirect(HTTPRequest * req, HTTPResponse * res);
     static void handleNotFound(HTTPRequest *req, HTTPResponse *res);
 };

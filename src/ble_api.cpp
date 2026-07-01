@@ -10,9 +10,8 @@ BLEDeviceEvent BLEApi::_cbOnDeviceDisconnected = nullptr;
 BLECharacteristicNotification BLEApi::_cbOnCharacteristicNotification = nullptr;
 NimBLEScanCallbacks *BLEApi::_advertisedDeviceCallback = nullptr;
 NimBLEClientCallbacks *BLEApi::_clientCallback = nullptr;
-std::map<BLEPeripheralID, uint8_t> BLEApi::addressTypes;
-BLERadarEntry BLEApi::_radar[ESP_GW_RADAR_MAX];
-uint8_t BLEApi::_radarCount = 0;
+AddrTypeEntry BLEApi::_addrTypes[ESP_GW_ADDR_TYPE_CACHE_MAX];
+uint8_t BLEApi::_addrTypeCount = 0;
 BLEConnection BLEApi::connections[MAX_CLIENT_CONNECTIONS];
 uint8_t BLEApi::activeConnections = 0;
 bool BLEApi::_scanRequested = false;
@@ -305,7 +304,7 @@ const std::vector<NimBLERemoteService *> *BLEApi::discoverServices(BLEPeripheral
   return nullptr;
 }
 
-const std::vector<NimBLERemoteCharacteristic *> *BLEApi::discoverCharacteristics(BLEPeripheralID id, std::string service)
+const std::vector<NimBLERemoteCharacteristic *> *BLEApi::discoverCharacteristics(BLEPeripheralID id, const std::string &service)
 {
   NimBLEClient *peripheral = getConnection(id);
   if (peripheral)
@@ -323,7 +322,7 @@ const std::vector<NimBLERemoteCharacteristic *> *BLEApi::discoverCharacteristics
   return nullptr;
 }
 
-std::string BLEApi::readCharacteristic(BLEPeripheralID id, std::string service, std::string characteristic)
+std::string BLEApi::readCharacteristic(BLEPeripheralID id, const std::string &service, const std::string &characteristic)
 {
   NimBLEClient *peripheral = getConnection(id);
   if (peripheral != nullptr)
@@ -345,7 +344,7 @@ std::string BLEApi::readCharacteristic(BLEPeripheralID id, std::string service, 
   return "";
 }
 
-bool BLEApi::notifyCharacteristic(BLEPeripheralID id, std::string service, std::string characteristic, bool notify)
+bool BLEApi::notifyCharacteristic(BLEPeripheralID id, const std::string &service, const std::string &characteristic, bool notify)
 {
   NimBLEClient *peripheral = getConnection(id);
   if (peripheral != nullptr)
@@ -374,7 +373,7 @@ bool BLEApi::notifyCharacteristic(BLEPeripheralID id, std::string service, std::
   return false;
 }
 
-bool BLEApi::writeCharacteristic(BLEPeripheralID id, std::string service, std::string characteristic, uint8_t *data, size_t length, bool withoutResponse)
+bool BLEApi::writeCharacteristic(BLEPeripheralID id, const std::string &service, const std::string &characteristic, uint8_t *data, size_t length, bool withoutResponse)
 {
   NimBLEClient *peripheral = getConnection(id);
   if (peripheral != nullptr)
@@ -402,17 +401,7 @@ bool BLEApi::writeCharacteristic(BLEPeripheralID id, std::string service, std::s
 void BLEApi::_onDeviceFoundProxy(const NimBLEAdvertisedDevice *advertisedDevice)
 {
   BLEPeripheralID devId = idFromAddress(advertisedDevice->getAddress());
-  // BLE privacy renouvelle les MAC aléatoires : sans borne ce cache croît
-  // indéfiniment et fragmente le tas. Les entrées ne servent que
-  // transitoirement à connect() et sont réapprises au prochain
-  // advertisement, donc une purge au plafond est sûre.
-  if (addressTypes.size() >= ESP_GW_ADDR_TYPE_CACHE_MAX &&
-      addressTypes.find(devId) == addressTypes.end())
-  {
-    addressTypes.clear();
-  }
-  addressTypes[devId] = advertisedDevice->getAddressType();
-  _radarUpsert(devId, (int8_t)advertisedDevice->getRSSI(), advertisedDevice->getName().c_str());
+  _storeAddressType(devId, advertisedDevice->getAddressType());
   if (_cbOnDeviceFound)
   {
     _cbOnDeviceFound(const_cast<NimBLEAdvertisedDevice *>(advertisedDevice), devId);
@@ -424,58 +413,56 @@ bool BLEApi::isScanning()
   return _isScanning;
 }
 
-uint8_t BLEApi::getRadar(const BLERadarEntry *&out)
-{
-  out = _radar;
-  return _radarCount;
-}
-
-// Insert/update a bounded radar entry (fixed array, no heap). Updates an
-// existing id in place; when full, evicts the oldest-seen entry. The name is
-// truncated and sanitized to printable ASCII so the JSON stays well-formed.
-void BLEApi::_radarUpsert(const BLEPeripheralID &id, int8_t rssi, const char *name)
+// Bounded address-type cache (fixed array, no heap). BLE privacy rotates random
+// MACs, so a std::map would grow/fragment the heap without bound; instead we
+// update in place, else insert, else evict the oldest-seen entry. Entries are
+// only needed transiently by connect() and re-learned on the next
+// advertisement, so eviction is safe.
+void BLEApi::_storeAddressType(const BLEPeripheralID &id, uint8_t type)
 {
   uint32_t now = millis();
-  uint8_t slot = _radarCount;
+  uint8_t slot = _addrTypeCount;
   uint8_t oldestIdx = 0;
   uint32_t oldestSeen = 0xFFFFFFFF;
-  for (uint8_t i = 0; i < _radarCount; i++)
+  for (uint8_t i = 0; i < _addrTypeCount; i++)
   {
-    if (_radar[i].id == id)
+    if (_addrTypes[i].id == id)
     {
       slot = i;
       break;
     }
-    if (_radar[i].lastSeen < oldestSeen)
+    if (_addrTypes[i].lastSeen < oldestSeen)
     {
-      oldestSeen = _radar[i].lastSeen;
+      oldestSeen = _addrTypes[i].lastSeen;
       oldestIdx = i;
     }
   }
-  if (slot == _radarCount)
+  if (slot == _addrTypeCount)
   {
-    if (_radarCount < ESP_GW_RADAR_MAX)
+    if (_addrTypeCount < ESP_GW_ADDR_TYPE_CACHE_MAX)
     {
-      _radarCount++;
+      _addrTypeCount++;
     }
     else
     {
       slot = oldestIdx; // full: replace the least-recently-seen entry
     }
   }
-  _radar[slot].id = id;
-  _radar[slot].rssi = rssi;
-  _radar[slot].lastSeen = now;
-  uint8_t j = 0;
-  if (name != nullptr)
+  _addrTypes[slot].id = id;
+  _addrTypes[slot].type = type;
+  _addrTypes[slot].lastSeen = now;
+}
+
+uint8_t BLEApi::_lookupAddressType(const BLEPeripheralID &id)
+{
+  for (uint8_t i = 0; i < _addrTypeCount; i++)
   {
-    for (; name[j] != '\0' && j < ESP_GW_RADAR_NAME_MAX - 1; j++)
+    if (_addrTypes[i].id == id)
     {
-      char c = name[j];
-      _radar[slot].name[j] = (c >= 0x20 && c < 0x7F) ? c : '?';
+      return _addrTypes[i].type;
     }
   }
-  _radar[slot].name[j] = '\0';
+  return BLE_ADDR_PUBLIC; // default when the type has not been learned yet
 }
 
 /**
@@ -600,7 +587,7 @@ NimBLEAddress BLEApi::addressFromId(BLEPeripheralID id)
   // this is stupid
   uint8_t address[6];
   std::reverse_copy(id.data(), id.data() + sizeof address, address);
-  return NimBLEAddress(address, addressTypes[id]);
+  return NimBLEAddress(address, _lookupAddressType(id));
 }
 
 std::string BLEApi::idToString(BLEPeripheralID id)

@@ -9,7 +9,32 @@ uint32_t NobleApi::authDeadline[WEBSOCKETS_SERVER_CLIENT_MAX];
 #define AUTH_TIMEOUT_MS 10000
 PeripheralClient NobleApi::peripheralConnections[MAX_CLIENT_CONNECTIONS];
 uint8_t NobleApi::activeConnections = 0;
-uint32_t NobleApi::webScanUntil = 0;
+QueueHandle_t NobleApi::txQueue = nullptr;
+QueueHandle_t NobleApi::connReqQueue = nullptr;
+QueueHandle_t NobleApi::connResQueue = nullptr;
+TaskHandle_t NobleApi::connWorkerTask = nullptr;
+
+// Sentinel client id meaning "send to every authenticated client".
+#define WS_TX_BROADCAST 0xFE
+#define WS_TX_QUEUE_LEN 16
+#define CONN_QUEUE_LEN MAX_CLIENT_CONNECTIONS
+
+struct WsTxItem
+{
+  uint8_t client;
+  char *payload; // heap-allocated, freed by drainTx after sending
+};
+struct ConnReq
+{
+  uint8_t client;
+  BLEPeripheralID id;
+};
+struct ConnRes
+{
+  uint8_t client;
+  BLEPeripheralID id;
+  bool ok;
+};
 
 bool isEmptyChallenge(Challenge challenge)
 {
@@ -55,6 +80,13 @@ bool NobleApi::init()
   BLEApi::onDeviceDisconnected(onBLEDeviceDisconnected);
   BLEApi::onCharacteristicNotification(onCharacteristicNotification);
 
+  // marshalling primitives: WS tx queue (all sends flushed from the loop task)
+  // and the connect worker (keeps the blocking connect off the loop task)
+  txQueue = xQueueCreate(WS_TX_QUEUE_LEN, sizeof(WsTxItem));
+  connReqQueue = xQueueCreate(CONN_QUEUE_LEN, sizeof(ConnReq));
+  connResQueue = xQueueCreate(CONN_QUEUE_LEN, sizeof(ConnRes));
+  xTaskCreatePinnedToCore(connWorker, "bleConnWorker", 8192, nullptr, 1, &connWorkerTask, 1);
+
   // initialize websocket
   ws = new WebSocketsServer(ESP_GW_WEBSOCKET_PORT);
   ws->enableHeartbeat(30000, 5000, 3);
@@ -90,27 +122,11 @@ void NobleApi::loop()
       }
     }
 
-    // Expire a web-driven (radar) scan: once the UI stopped polling and no
-    // noble client is connected, stop scanning so we don't scan forever.
-    if (webScanUntil != 0 && now > webScanUntil)
-    {
-      webScanUntil = 0;
-      if (ws->connectedClients() == 0)
-      {
-        BLEApi::stopScan();
-      }
-    }
-  }
-}
-
-// Keep a BLE scan alive for the web radar even if no noble client is
-// connected. Called on each /radar poll; auto-expires via loop().
-void NobleApi::radarKeepAlive()
-{
-  webScanUntil = millis() + ESP_GW_RADAR_KEEPALIVE_MS;
-  if (!BLEApi::isScanning())
-  {
-    BLEApi::startScan(0, true);
+    // hand back connect() results, then flush all queued WS messages. drainTx
+    // is the ONLY place ws->sendTXT is called, so producers on other tasks
+    // (NimBLE callbacks, connect worker) never touch the socket directly.
+    drainConnResults();
+    drainTx();
   }
 }
 
@@ -171,7 +187,7 @@ void NobleApi::onWsEvent(uint8_t client, WStype_t type, uint8_t *payload, size_t
   {
     clientDisconnectCleanup(client);
     Serial.printf("[%u] Disconnected!\n", client);
-    if (ws->connectedClients() == 0 && millis() > webScanUntil)
+    if (ws->connectedClients() == 0)
     {
       BLEApi::stopScan();
     }
@@ -215,7 +231,9 @@ void NobleApi::onWsEvent(uint8_t client, WStype_t type, uint8_t *payload, size_t
           if (strcmp(action, "auth") == 0)
           {
             const char *response = command["response"];
-            if (strlen(response) > 0)
+            // response is null when the key is absent; strlen(null) would crash,
+            // letting an unauthenticated client reboot the gateway.
+            if (response != nullptr && strlen(response) > 0)
             {
               checkAuth(client, response);
             }
@@ -257,20 +275,19 @@ void NobleApi::onWsEvent(uint8_t client, WStype_t type, uint8_t *payload, size_t
               // connection
               if (strcmp(action, "connect") == 0)
               {
-                // check if peripheralUuid is not asigned to another client, asign client to periperhalUuid, check connection
+                // Reserve the peripheral for this client, then offload the
+                // blocking connect to connWorker. The connect/disconnect reply
+                // is sent later from drainConnResults (loop task) so this
+                // handler — and the WebSocket — never blocks for ~seconds.
                 if (clientCanConnect(client, peripheralUuid))
                 {
-                  addClient(peripheralUuid, client);
-                  // TODO: check if re-connection to peripheral is ok (in case client sends multiple connect but no disconnect)
-                  bool connected = BLEApi::connect(peripheralUuid);
-                  if (connected)
+                  addClient(peripheralUuid, client); // reserve the slot
+                  ConnReq req = {client, peripheralUuid};
+                  if (connReqQueue == nullptr || xQueueSend(connReqQueue, &req, 0) != pdTRUE)
                   {
-                    sendConnected(client, peripheralUuid);
-                  }
-                  else
-                  {
+                    // worker queue full: release the reservation and report busy
                     delClient(peripheralUuid);
-                    sendDisconnected(client, peripheralUuid, "failed");
+                    sendDisconnected(client, peripheralUuid, "busy");
                   }
                 }
                 else
@@ -368,8 +385,29 @@ void NobleApi::onWsEvent(uint8_t client, WStype_t type, uint8_t *payload, size_t
   }
 }
 
+// An authenticated client has an empty challenge (cleared on successful auth).
+// Same predicate drainTx uses to fan out broadcasts.
+bool NobleApi::hasAuthenticatedClient()
+{
+  for (uint8_t c = 0; c < WEBSOCKETS_SERVER_CLIENT_MAX; c++)
+  {
+    if (ws->clientIsConnected(c) && isEmptyChallenge(challenges[c]))
+    {
+      return true;
+    }
+  }
+  return false;
+}
+
 void NobleApi::onBLEDeviceFound(NimBLEAdvertisedDevice *advertisedDevice, BLEPeripheralID id)
 {
+  // No authenticated noble client means nobody consumes discover events, so we
+  // skip the JSON build + malloc that drainTx would otherwise just discard.
+  if (!hasAuthenticatedClient())
+  {
+    return;
+  }
+
   JsonDocument command;
   command["type"] = "discover";
   command["peripheralUuid"] = BLEApi::idToString(id);
@@ -420,7 +458,7 @@ void NobleApi::onBLEDeviceDisconnected(BLEPeripheralID id)
   }
 }
 
-void NobleApi::onCharacteristicNotification(BLEPeripheralID id, std::string service, std::string characteristic, std::string data, bool isNotify)
+void NobleApi::onCharacteristicNotification(BLEPeripheralID id, const std::string &service, const std::string &characteristic, const std::string &data, bool isNotify)
 {
   uint8_t client = getClient(id);
   if (client != INVALID_CLIENT)
@@ -475,33 +513,119 @@ void NobleApi::checkAuth(uint8_t client, const char *response)
 void NobleApi::sendJsonMessage(JsonDocument &command, const uint8_t client)
 {
   size_t messageLength = measureJson(command) + 1;
-  char buffer[messageLength];
-  // serializeJson null-terminates within `messageLength`; no manual terminator
-  serializeJson(command, buffer, messageLength);
-  ws->sendTXT(client, buffer);
+  // Heap-allocate (not a stack VLA): this runs on the NimBLE host task too,
+  // whose stack is far smaller than the loop task's, and the buffer is owned by
+  // the queue until drainTx frees it.
+  char *payload = (char *)malloc(messageLength);
+  if (payload != nullptr)
+  {
+    serializeJson(command, payload, messageLength);
+    enqueueTx(client, payload); // ownership transferred to the queue
+  }
   command.clear();
 }
 
 void NobleApi::sendJsonMessage(JsonDocument &command)
 {
   size_t messageLength = measureJson(command) + 1;
-  char buffer[messageLength];
-  // serializeJson null-terminates within `messageLength`; no manual terminator
-  serializeJson(command, buffer, messageLength);
-  command.clear();
-
-  for (uint8_t client = 0; client < WEBSOCKETS_SERVER_CLIENT_MAX; client++)
+  char *payload = (char *)malloc(messageLength);
+  if (payload != nullptr)
   {
-    if (ws->clientIsConnected(client))
+    serializeJson(command, payload, messageLength);
+    // fanned out to every authenticated client in drainTx (loop task)
+    enqueueTx(WS_TX_BROADCAST, payload);
+  }
+  command.clear();
+}
+
+// Queue an outgoing message; the queue takes ownership of `payload`. Never
+// blocks the producer: on a full/unready queue the message is dropped+freed.
+void NobleApi::enqueueTx(uint8_t client, char *payload)
+{
+  WsTxItem item = {client, payload};
+  if (txQueue == nullptr || xQueueSend(txQueue, &item, 0) != pdTRUE)
+  {
+    free(payload);
+  }
+}
+
+// Flush every queued message to the socket. ONLY called from the loop task, so
+// ws->sendTXT is never invoked concurrently from another task.
+void NobleApi::drainTx()
+{
+  if (txQueue == nullptr)
+  {
+    return;
+  }
+  WsTxItem item;
+  while (xQueueReceive(txQueue, &item, 0) == pdTRUE)
+  {
+    if (item.client == WS_TX_BROADCAST)
     {
-      // only send to auth clients
-      if (isEmptyChallenge(challenges[client]))
+      for (uint8_t c = 0; c < WEBSOCKETS_SERVER_CLIENT_MAX; c++)
       {
-        // ESP_LOG_BUFFER_HEXDUMP("Send", buffer, messageLength, esp_log_level_t::ESP_LOG_INFO);
-        // Serial.printf("[%u] sent Text: %s\n", client, buffer);
-        // TODO: use service filter in case of discovery events
-        ws->sendTXT(client, buffer);
+        if (ws->clientIsConnected(c) && isEmptyChallenge(challenges[c]))
+        {
+          ws->sendTXT(c, item.payload);
+        }
       }
+    }
+    else if (ws->clientIsConnected(item.client))
+    {
+      ws->sendTXT(item.client, item.payload);
+    }
+    free(item.payload);
+  }
+}
+
+// Handle connect() results produced by connWorker (loop task context).
+void NobleApi::drainConnResults()
+{
+  if (connResQueue == nullptr)
+  {
+    return;
+  }
+  ConnRes res;
+  while (xQueueReceive(connResQueue, &res, 0) == pdTRUE)
+  {
+    if (res.ok)
+    {
+      // The client may have dropped or released the reservation while the
+      // connect was in flight; only confirm if it still owns the peripheral.
+      if (ws->clientIsConnected(res.client) && clientConnected(res.client, res.id))
+      {
+        sendConnected(res.client, res.id);
+      }
+      else
+      {
+        BLEApi::disconnect(res.id);
+        delClient(res.id);
+      }
+    }
+    else
+    {
+      delClient(res.id);
+      sendDisconnected(res.client, res.id, "failed");
+    }
+  }
+}
+
+// Dedicated task: runs the blocking BLEApi::connect off the loop task.
+void NobleApi::connWorker(void *arg)
+{
+  if (connReqQueue == nullptr || connResQueue == nullptr)
+  {
+    vTaskDelete(nullptr);
+    return;
+  }
+  ConnReq req;
+  for (;;)
+  {
+    if (xQueueReceive(connReqQueue, &req, portMAX_DELAY) == pdTRUE)
+    {
+      bool ok = BLEApi::connect(req.id);
+      ConnRes res = {req.client, req.id, ok};
+      xQueueSend(connResQueue, &res, portMAX_DELAY);
     }
   }
 }

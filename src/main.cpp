@@ -3,6 +3,8 @@
 #include <DNSServer.h>
 #include <ESPmDNS.h>
 #include <ArduinoJson.h>
+#include <esp_system.h>
+#include <esp_ota_ops.h>
 
 #include "gw_settings.h"
 #include "web.h"
@@ -11,6 +13,17 @@
 
 #define WIFI_CONNECT_RETRY 5
 #define WIFI_CONFIGURE_DNS_PORT 53
+
+// Bump on each build so the boot banner confirms which firmware is actually
+// running after an OTA (if it doesn't change, the OTA didn't switch slots).
+#define FW_VERSION "1.3.2"
+
+// Diagnostic heartbeat: loop() sets g_loopPhase before each subsystem and bumps
+// g_loopCount at the end of every iteration. A separate task (diagTask, other
+// core) samples them, so if loop() hangs the frozen phase pinpoints the culprit
+// subsystem even though loop() itself can no longer print anything.
+static volatile const char *g_loopPhase = "init";
+static volatile uint32_t g_loopCount = 0;
 
 // Pile de la tâche Arduino loop = 16 Ko. NE PAS utiliser
 // -DCONFIG_ARDUINO_LOOP_STACK_SIZE : le sdkconfig.h du framework le redéfinit
@@ -23,6 +36,81 @@ SET_LOOP_TASK_STACK_SIZE(16 * 1024);
 
 DNSServer *dnsServer = nullptr;
 bool connected = false;
+
+static const char *resetReasonStr(esp_reset_reason_t r)
+{
+  switch (r)
+  {
+  case ESP_RST_POWERON: return "POWERON (power-on / cold boot)";
+  case ESP_RST_EXT: return "EXT (external pin)";
+  case ESP_RST_SW: return "SW (esp_restart)";
+  case ESP_RST_PANIC: return "PANIC (exception/abort)";
+  case ESP_RST_INT_WDT: return "INT_WDT (interrupt watchdog)";
+  case ESP_RST_TASK_WDT: return "TASK_WDT (task watchdog)";
+  case ESP_RST_WDT: return "WDT (other watchdog)";
+  case ESP_RST_DEEPSLEEP: return "DEEPSLEEP";
+  case ESP_RST_BROWNOUT: return "BROWNOUT (power dip)";
+  case ESP_RST_SDIO: return "SDIO";
+  default: return "UNKNOWN";
+  }
+}
+
+// One-shot boot banner: identifies the chip/flash and, crucially, prints the
+// running OTA partition + firmware build id + reset reason so we can tell
+// whether an OTA actually switched firmware and why the device rebooted.
+static void printDiagBanner()
+{
+  const esp_partition_t *run = esp_ota_get_running_partition();
+  uint64_t mac = ESP.getEfuseMac();
+  Serial.println("======================= DIAG =======================");
+  Serial.printf("Firmware    : %s  (build %s %s)\n", FW_VERSION, __DATE__, __TIME__);
+  Serial.printf("Running part : %s @ 0x%06x size 0x%06x\n",
+                run ? run->label : "?",
+                (unsigned)(run ? run->address : 0),
+                (unsigned)(run ? run->size : 0));
+  Serial.printf("Reset reason : %s\n", resetReasonStr(esp_reset_reason()));
+  Serial.printf("Chip        : %s rev%d, %d core(s) @ %u MHz\n",
+                ESP.getChipModel(), ESP.getChipRevision(),
+                ESP.getChipCores(), (unsigned)ESP.getCpuFreqMHz());
+  Serial.printf("Flash       : %u bytes, mode %d, %u Hz\n",
+                (unsigned)ESP.getFlashChipSize(), (int)ESP.getFlashChipMode(),
+                (unsigned)ESP.getFlashChipSpeed());
+  Serial.printf("PSRAM       : %u bytes\n", (unsigned)ESP.getPsramSize());
+  Serial.printf("IDF / SDK   : %s / %s\n", esp_get_idf_version(), ESP.getSdkVersion());
+  Serial.printf("MAC         : %04X%08X\n",
+                (uint16_t)(mac >> 32), (uint32_t)mac);
+  Serial.println("====================================================");
+}
+
+// Runs on the other core so it keeps printing even when loop() is wedged. When
+// g_loopCount stops advancing, the frozen g_loopPhase names the stuck subsystem.
+static void diagTask(void *arg)
+{
+  uint32_t lastCount = 0;
+  uint32_t stuckSince = millis();
+  for (;;)
+  {
+    vTaskDelay(2000 / portTICK_PERIOD_MS);
+    uint32_t c = g_loopCount;
+    uint32_t now = millis();
+    if (c == lastCount)
+    {
+      Serial.printf("[diag] LOOP STUCK phase='%s' for %ums (count=%u)\n",
+                    g_loopPhase, (unsigned)(now - stuckSince), (unsigned)c);
+    }
+    else
+    {
+      stuckSince = now;
+      static uint32_t lastAlive = 0;
+      if (now - lastAlive >= 10000)
+      {
+        lastAlive = now;
+        Serial.printf("[diag] alive phase='%s' count=%u\n", g_loopPhase, (unsigned)c);
+      }
+    }
+    lastCount = c;
+  }
+}
 
 // Diagnostic: log the WiFi disconnect reason code (beacon timeout / auth /
 // 4-way handshake / coexistence) to pinpoint the root cause of instability.
@@ -151,6 +239,10 @@ void setup()
   Serial.begin(921600);
   delay(200);
   Serial.println();
+  printDiagBanner();
+  // loop() runs on core 1; pin the heartbeat sampler to core 0 so a wedged
+  // loop() can't starve it.
+  xTaskCreatePinnedToCore(diagTask, "diag", 3072, nullptr, 1, nullptr, 0);
   // esp_log_level_set("*", ESP_LOG_VERBOSE);
   GwSettings::init();
 
@@ -229,14 +321,20 @@ void loop()
   if (dnsServer != nullptr)
   {
     // when in configuration mode handle DNS requests
+    g_loopPhase = "dns";
     dnsServer->processNextRequest();
   }
   else
   {
+    g_loopPhase = "wifi";
     maintainWifi();
   }
+  g_loopPhase = "noble";
   NobleApi::loop();
+  g_loopPhase = "web";
   WebManager::loop();
+  g_loopPhase = "idle";
+  g_loopCount++;
 
   // periodic heap/fragmentation sample for diagnostics
   static uint32_t lastMemLog = 0;

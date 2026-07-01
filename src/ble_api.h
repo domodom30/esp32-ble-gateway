@@ -25,28 +25,12 @@
 #define ESP_GW_ADDR_TYPE_CACHE_MAX 128
 #endif
 
-// Bluetooth "radar": a small, bounded snapshot of recently-seen advertisers
-// for the web UI. Fixed array (no heap, same philosophy as the addr cache).
-#ifndef ESP_GW_RADAR_MAX
-#define ESP_GW_RADAR_MAX 24
-#endif
-#ifndef ESP_GW_RADAR_NAME_MAX
-#define ESP_GW_RADAR_NAME_MAX 20
-#endif
-#ifndef ESP_GW_RADAR_TTL_MS
-#define ESP_GW_RADAR_TTL_MS 30000
-#endif
-#ifndef ESP_GW_RADAR_KEEPALIVE_MS
-#define ESP_GW_RADAR_KEEPALIVE_MS 10000
-#endif
-
 #define CONFIG_BT_NIMBLE_MAX_CONNECTIONS MAX_CLIENT_CONNECTIONS
 
 #include <Arduino.h>
 #include <NimBLEDevice.h>
 #include <esp_bt_defs.h>
 #include <functional>
-#include <map>
 #include "util.h"
 
 class myAdvertisedDeviceCallbacks;
@@ -55,20 +39,21 @@ class myClientCallbacks;
 typedef std::array<uint8_t, ESP_BD_ADDR_LEN> BLEPeripheralID;
 typedef std::function<void(NimBLEAdvertisedDevice *advertisedDevice, BLEPeripheralID id)> BLEDeviceFound;
 typedef std::function<void(BLEPeripheralID id)> BLEDeviceEvent;
-typedef std::function<void(BLEPeripheralID id, std::string service, std::string characteristic, std::string data, bool isNotify)> BLECharacteristicNotification;
+typedef std::function<void(BLEPeripheralID id, const std::string &service, const std::string &characteristic, const std::string &data, bool isNotify)> BLECharacteristicNotification;
 struct BLEConnection
 {
   BLEPeripheralID id;
   NimBLEClient *device;
 };
 
-// One bounded radar snapshot entry (fixed-size, no heap).
-struct BLERadarEntry
+// One bounded address-type cache entry (fixed-size, no heap). Replaces a
+// std::map whose per-node heap allocations fragmented the heap as BLE privacy
+// rotated random MACs.
+struct AddrTypeEntry
 {
   BLEPeripheralID id;
-  int8_t rssi;
+  uint8_t type;
   uint32_t lastSeen;
-  char name[ESP_GW_RADAR_NAME_MAX];
 };
 
 class BLEApi
@@ -79,9 +64,6 @@ public:
   static bool startScan(uint32_t duration = 0, bool active = true);
   static bool stopScan();
   static bool isScanning();
-  // Radar snapshot for the web UI: writes the internal array pointer into
-  // `out` and returns the entry count (caller filters stale by lastSeen).
-  static uint8_t getRadar(const BLERadarEntry *&out);
   static void onDeviceFound(BLEDeviceFound cb);
   static void onDeviceConnected(BLEDeviceEvent cb);
   static void onDeviceDisconnected(BLEDeviceEvent cb);
@@ -89,10 +71,10 @@ public:
   static bool connect(BLEPeripheralID);
   static bool disconnect(BLEPeripheralID);
   static const std::vector<NimBLERemoteService *> *discoverServices(BLEPeripheralID id);
-  static const std::vector<NimBLERemoteCharacteristic *> *discoverCharacteristics(BLEPeripheralID id, std::string service);
-  static std::string readCharacteristic(BLEPeripheralID id, std::string service, std::string characteristic);
-  static bool notifyCharacteristic(BLEPeripheralID id, std::string service, std::string characteristic, bool notify = true);
-  static bool writeCharacteristic(BLEPeripheralID id, std::string service, std::string characteristic, uint8_t *data, size_t length, bool withoutResponse = true);
+  static const std::vector<NimBLERemoteCharacteristic *> *discoverCharacteristics(BLEPeripheralID id, const std::string &service);
+  static std::string readCharacteristic(BLEPeripheralID id, const std::string &service, const std::string &characteristic);
+  static bool notifyCharacteristic(BLEPeripheralID id, const std::string &service, const std::string &characteristic, bool notify = true);
+  static bool writeCharacteristic(BLEPeripheralID id, const std::string &service, const std::string &characteristic, uint8_t *data, size_t length, bool withoutResponse = true);
   static BLEPeripheralID idFromAddress(NimBLEAddress address);
   static NimBLEAddress addressFromId(BLEPeripheralID id);
   static std::string idToString(BLEPeripheralID id);
@@ -115,11 +97,11 @@ private:
   static NimBLEScanCallbacks *_advertisedDeviceCallback;
   static NimBLEClientCallbacks *_clientCallback;
   static NimBLEScan *bleScan;
-  static std::map<BLEPeripheralID, uint8_t> addressTypes;
-  // bounded radar cache (fixed array, no heap)
-  static BLERadarEntry _radar[ESP_GW_RADAR_MAX];
-  static uint8_t _radarCount;
-  static void _radarUpsert(const BLEPeripheralID &id, int8_t rssi, const char *name);
+  // bounded address-type cache (fixed array, no heap; replaces std::map)
+  static AddrTypeEntry _addrTypes[ESP_GW_ADDR_TYPE_CACHE_MAX];
+  static uint8_t _addrTypeCount;
+  static void _storeAddressType(const BLEPeripheralID &id, uint8_t type);
+  static uint8_t _lookupAddressType(const BLEPeripheralID &id);
   static void _onScanFinished(const NimBLEScanResults &results);
   static void _onCharacteristicNotification(NimBLERemoteCharacteristic *characteristic, uint8_t *data, size_t length, bool isNotify);
   static void _onDeviceFoundProxy(const NimBLEAdvertisedDevice *advertisedDevice);

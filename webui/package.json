@@ -1,20 +1,23 @@
 {
   "name": "webui",
-  "version": "1.3.1",
+  "version": "1.6.0",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "deploy": "npm run build"
+    "embed": "python ../tools/gen_web_ui.py",
+    "compile": "npm run build && npm run embed",
+    "deploy": "npm run compile"
   },
   "dependencies": {
     "vue": "^3.4.0"
   },
   "devDependencies": {
     "@vitejs/plugin-vue": "^5.0.0",
+    "terser": "^5.48.0",
     "vite": "^5.0.0",
-    "vite-plugin-singlefile": "^2.0.0",
-    "vite-plugin-compression2": "^1.1.0"
+    "vite-plugin-compression2": "^1.1.0",
+    "vite-plugin-singlefile": "^2.0.0"
   }
 }
