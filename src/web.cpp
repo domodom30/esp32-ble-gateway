@@ -2,6 +2,7 @@
 #include <Update.h>
 #include "noble_api.h"
 #include "ble_api.h"
+#include "led.h"
 #include "web_ui.h"
 
 // Fenêtre laissée aux boucles serveur pour flusher la réponse TLS ("OK") vers le
@@ -84,6 +85,8 @@ bool WebManager::init()
   serverSecure->registerNode(new ResourceNode("/", "GET", handleHome));
   serverSecure->registerNode(new ResourceNode("/config", "GET", handleConfigGet));
   serverSecure->registerNode(new ResourceNode("/config", "POST", handleConfigSet));
+  serverSecure->registerNode(new ResourceNode("/led2", "GET", handleLed2Get));
+  serverSecure->registerNode(new ResourceNode("/led2", "POST", handleLed2Set));
   serverSecure->registerNode(new ResourceNode("/factoryReset", "GET", handleFactoryReset));
   serverSecure->registerNode(new ResourceNode("/restart", "GET", handleRestart));
   serverSecure->registerNode(new ResourceNode("/update/prepare", "GET", handleOtaPrepare));
@@ -431,6 +434,64 @@ void WebManager::handleConfigSet(HTTPRequest *req, HTTPResponse *res)
     Serial.println("Rebooting");
   }
   meminfo();
+}
+
+void WebManager::handleLed2Get(HTTPRequest *req, HTTPResponse *res)
+{
+  res->setHeader("Content-Type", "application/json");
+  res->setHeader("Connection", "close");
+
+  JsonDocument doc;
+  doc["enabled"] = GwSettings::getLed2Enabled();
+  doc["connected"] = NobleApi::isHaConnected();
+
+  size_t len = serializeJson(doc, buffer, ESP_GW_WEBSERVER_BUFFER_SIZE);
+  res->write((uint8_t *)buffer, len);
+}
+
+void WebManager::handleLed2Set(HTTPRequest *req, HTTPResponse *res)
+{
+  res->setHeader("Connection", "close");
+
+  size_t idx = 0;
+  while (!req->requestComplete() && idx < ESP_GW_WEBSERVER_BUFFER_SIZE)
+  {
+    idx += req->readChars((char *)buffer + idx, ESP_GW_WEBSERVER_BUFFER_SIZE - idx);
+  }
+
+  if (!req->requestComplete())
+  {
+    res->setStatusCode(413);
+    res->setStatusText("Request entity too large");
+    res->println("413 Request entity too large");
+    return;
+  }
+
+  buffer[idx + 1] = '\0';
+
+  JsonDocument doc;
+  DeserializationError error = deserializeJson(doc, buffer, idx + 1);
+
+  if (error != DeserializationError::Ok || !doc["enabled"].is<bool>())
+  {
+    res->setStatusCode(400);
+    res->setStatusText("Invalid JSON format");
+    res->println("400 Invalid JSON format");
+    return;
+  }
+
+  bool enabled = doc["enabled"];
+  GwSettings::setLed2Enabled(enabled);
+
+  res->setHeader("Content-Type", "application/json");
+  res->setStatusCode(200);
+  res->setStatusText("OK");
+
+  JsonDocument resp;
+  resp["enabled"] = enabled;
+  resp["connected"] = NobleApi::isHaConnected();
+  size_t len = serializeJson(resp, buffer, ESP_GW_WEBSERVER_BUFFER_SIZE);
+  res->write((uint8_t *)buffer, len);
 }
 
 void WebManager::handleFactoryReset(HTTPRequest *req, HTTPResponse *res)

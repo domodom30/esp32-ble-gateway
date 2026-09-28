@@ -9,6 +9,7 @@
 #include "gw_settings.h"
 #include "web.h"
 #include "noble_api.h"
+#include "led.h"
 #include "util.h"
 
 #define WIFI_CONNECT_RETRY 5
@@ -273,6 +274,7 @@ void setup()
   }
 
   NobleApi::init();
+  LedIndicator::init();
 
   if (mdnsSuccess)
   {
@@ -331,6 +333,8 @@ void loop()
   }
   g_loopPhase = "noble";
   NobleApi::loop();
+  g_loopPhase = "led";
+  LedIndicator::loop();
   g_loopPhase = "web";
   WebManager::loop();
   g_loopPhase = "idle";

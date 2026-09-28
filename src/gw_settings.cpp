@@ -26,6 +26,7 @@ uint8_t *GwSettings::cert = nullptr;
 size_t GwSettings::certLen = 0;
 uint8_t *GwSettings::pk = nullptr;
 size_t GwSettings::pkLen = 0;
+bool GwSettings::led2Enabled = true;
 
 bool GwSettings::init()
 {
@@ -160,6 +161,18 @@ bool GwSettings::init()
     pkLen = prefs.getBytesLength("pk");
     pk = new uint8_t[pkLen];
     prefs.getBytes("pk", pk, pkLen);
+  }
+
+  // LED2 (GPIO2) connection-status indicator: enabled by default, persisted
+  // across reboot.
+  if (!prefs.isKey("led2_en"))
+  {
+    led2Enabled = true;
+    prefs.putBool("led2_en", led2Enabled);
+  }
+  else
+  {
+    led2Enabled = prefs.getBool("led2_en", true);
   }
 
   ready = true;
@@ -368,4 +381,11 @@ void GwSettings::setPk(const uint8_t *val, size_t len)
   pkLen = len;
   pk = new uint8_t[pkLen];
   memcpy(pk, val, pkLen);
+}
+
+bool GwSettings::getLed2Enabled() { return led2Enabled; }
+void GwSettings::setLed2Enabled(bool val)
+{
+  led2Enabled = val;
+  prefs.putBool("led2_en", led2Enabled);
 }

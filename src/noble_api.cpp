@@ -1,4 +1,5 @@
 #include "noble_api.h"
+#include <WiFi.h>
 #include <map>
 
 bool NobleApi::ready = false;
@@ -397,6 +398,11 @@ bool NobleApi::hasAuthenticatedClient()
     }
   }
   return false;
+}
+
+bool NobleApi::isHaConnected()
+{
+  return WiFi.status() == WL_CONNECTED && hasAuthenticatedClient();
 }
 
 void NobleApi::onBLEDeviceFound(NimBLEAdvertisedDevice *advertisedDevice, BLEPeripheralID id)

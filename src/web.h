@@ -50,6 +50,8 @@ class WebManager {
     static void handleHome(HTTPRequest * req, HTTPResponse * res);
     static void handleConfigGet(HTTPRequest * req, HTTPResponse * res);
     static void handleConfigSet(HTTPRequest * req, HTTPResponse * res);
+    static void handleLed2Get(HTTPRequest * req, HTTPResponse * res);
+    static void handleLed2Set(HTTPRequest * req, HTTPResponse * res);
     static void handleFactoryReset(HTTPRequest * req, HTTPResponse * res);
     static void handleRestart(HTTPRequest * req, HTTPResponse * res);
     static void handleOtaPrepare(HTTPRequest * req, HTTPResponse * res);

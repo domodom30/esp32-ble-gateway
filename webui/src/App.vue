@@ -202,6 +202,25 @@
           </div>
         </form>
 
+        <div v-if="view === 'reseau' && ready" class="panel">
+          <div class="grid">
+            <div class="field full section-sep">
+              <span class="section-label">{{ t('led2.title') }}</span>
+            </div>
+            <div class="field full toggle-row">
+              <label class="switch">
+                <input type="checkbox" :checked="led2Enabled" :disabled="led2Saving"
+                       @change="toggleLed2($event.target.checked)" />
+                <span class="switch-track"></span>
+              </label>
+              <div class="toggle-label">
+                <span>{{ led2Enabled ? t('led2.enabled') : t('led2.disabled') }}</span>
+                <span class="hint">{{ led2Connected ? t('led2.statusConnected') : t('led2.statusDisconnected') }}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
         <!-- OTA : mise à jour firmware -->
         <div v-else-if="view === 'ota'" class="panel">
           <div class="fw-update">
@@ -339,6 +358,12 @@ const messages = {
     'net.gateway': 'Gateway',
     'net.dnsServer': 'DNS server',
 
+    'led2.title': 'Status LED',
+    'led2.enabled': 'Enabled',
+    'led2.disabled': 'Disabled',
+    'led2.statusConnected': 'Gateway connected to Home Assistant',
+    'led2.statusDisconnected': 'Gateway not connected',
+
     'ota.title': 'Firmware update',
     'ota.flash': 'Flash',
     'ota.hint': 'Upload the compiled binary (.bin); the device reboots after the update. Do not power off.',
@@ -375,6 +400,7 @@ const messages = {
     'err.factory': 'Factory reset failed',
     'err.updateHttp': 'Update failed (HTTP {status})',
     'err.firmware': 'Firmware update failed',
+    'err.led2': 'Failed to update LED setting',
   },
   fr: {
     'nav.identifiants.label': 'Identifiants',
@@ -425,6 +451,12 @@ const messages = {
     'net.gateway': 'Passerelle',
     'net.dnsServer': 'Serveur DNS',
 
+    'led2.title': 'LED d\'état',
+    'led2.enabled': 'Activée',
+    'led2.disabled': 'Désactivée',
+    'led2.statusConnected': 'Passerelle connectée à Home Assistant',
+    'led2.statusDisconnected': 'Passerelle non connectée',
+
     'ota.title': 'Mise à jour firmware',
     'ota.flash': 'Flash',
     'ota.hint': 'Téléversez le binaire compilé (.bin) ; l\'appareil redémarre après la mise à jour. Ne coupez pas l\'alimentation.',
@@ -461,6 +493,7 @@ const messages = {
     'err.factory': 'Échec de la réinitialisation',
     'err.updateHttp': 'Échec de la mise à jour (HTTP {status})',
     'err.firmware': 'Échec de la mise à jour du firmware',
+    'err.led2': 'Échec de la mise à jour du réglage LED',
   },
 }
 
@@ -522,6 +555,9 @@ const errors   = ref([])
 const notice   = ref('')
 const saving   = ref(false)
 const sysBusy  = ref(false)
+const led2Enabled   = ref(true)
+const led2Connected = ref(false)
+const led2Saving    = ref(false)
 const show = reactive({ password: false, wifi: false, aes: false, ble: false })
 
 const dialog = reactive({
@@ -718,6 +754,38 @@ async function saveConfig() {
   saving.value = false
 }
 
+async function loadLed2() {
+  try {
+    const res = await apiFetch('/led2')
+    const data = await res.json()
+    led2Enabled.value = data.enabled
+    led2Connected.value = data.connected
+  } catch (e) {
+    // Non critique : ne pas polluer les erreurs de chargement de la page.
+  }
+}
+
+async function toggleLed2(next) {
+  if (led2Saving.value) return
+  led2Saving.value = true
+  const prev = led2Enabled.value
+  led2Enabled.value = next
+  try {
+    const res = await apiFetch('/led2', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: next }),
+    })
+    const data = await res.json()
+    led2Enabled.value = data.enabled
+    led2Connected.value = data.connected
+  } catch (e) {
+    led2Enabled.value = prev
+    errors.value.push(e.message || t('err.led2'))
+  }
+  led2Saving.value = false
+}
+
 function closeDialog() {
   if (sysBusy.value) return
   dialog.open = false
@@ -863,7 +931,7 @@ try {
 } catch (_) { /* ignore */ }
 applyLocale()
 
-onMounted(loadConfig)
+onMounted(() => { loadConfig(); loadLed2() })
 </script>
 
 <style>
@@ -1080,6 +1148,30 @@ code { color: var(--primary); font-size: .85em }
   text-transform: uppercase;
   letter-spacing: .04em;
 }
+
+.toggle-row { flex-direction: row; align-items: center; gap: .9rem }
+.toggle-label { display: flex; flex-direction: column; gap: .15rem }
+
+.switch { position: relative; display: inline-block; width: 42px; height: 24px; flex: none }
+.switch input { position: absolute; opacity: 0; width: 100%; height: 100%; margin: 0; cursor: pointer }
+.switch-track {
+  position: absolute; inset: 0;
+  background: var(--border);
+  border-radius: 999px;
+  transition: background .15s;
+}
+.switch-track::before {
+  content: '';
+  position: absolute;
+  left: 3px; top: 3px;
+  width: 18px; height: 18px;
+  background: #fff;
+  border-radius: 50%;
+  transition: transform .15s;
+}
+.switch input:checked + .switch-track { background: var(--success) }
+.switch input:checked + .switch-track::before { transform: translateX(18px) }
+.switch input:disabled + .switch-track { opacity: .5; cursor: not-allowed }
 
 .actions { margin-top: 1.75rem; text-align: right }
 

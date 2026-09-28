@@ -62,6 +62,9 @@ public:
   static size_t getPkLen();
   static void setPk(const uint8_t *val, size_t len);
 
+  static bool getLed2Enabled();
+  static void setLed2Enabled(bool val);
+
 private:
   static bool ready;
   static Preferences prefs;
@@ -99,6 +102,8 @@ private:
 
   static uint8_t *pk;
   static size_t pkLen;
+
+  static bool led2Enabled;
 };
 
 #endif

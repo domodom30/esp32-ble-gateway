@@ -31,6 +31,10 @@ class NobleApi
 public:
   static bool init();
   static void loop();
+  // true if WiFi is associated with an IP AND at least one WebSocket client
+  // is connected and authenticated. Used by LedIndicator to pick the blink
+  // pattern.
+  static bool isHaConnected();
 
 private:
   static bool ready;
