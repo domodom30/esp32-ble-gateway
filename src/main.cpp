@@ -17,7 +17,7 @@
 
 // Bump on each build so the boot banner confirms which firmware is actually
 // running after an OTA (if it doesn't change, the OTA didn't switch slots).
-#define FW_VERSION "1.3.3"
+#define FW_VERSION "1.4.0"
 
 // Diagnostic heartbeat: loop() sets g_loopPhase before each subsystem and bumps
 // g_loopCount at the end of every iteration. A separate task (diagTask, other
