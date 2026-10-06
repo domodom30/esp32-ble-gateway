@@ -98,6 +98,13 @@
               <label for="aes">{{ t('cred.aesKey') }}</label>
               <div class="input-group">
                 <input id="aes" :type="show.aes ? 'text' : 'password'" v-model="aes_key" :placeholder="t('cred.aesPlaceholder')" />
+                <button type="button" class="eye-btn" @click="generateAesKey" :title="t('cred.aesGenerate')" :aria-label="t('cred.aesGenerate')">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18">
+                    <polyline points="23 4 23 10 17 10"/>
+                    <polyline points="1 20 1 14 7 14"/>
+                    <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
+                  </svg>
+                </button>
                 <button type="button" class="eye-btn" @click="show.aes = !show.aes" :aria-label="show.aes ? t('common.hide') : t('common.show')">
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18">
                     <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
@@ -342,6 +349,8 @@ const messages = {
     'cred.aesKey': 'AES Key',
     'cred.aesPlaceholder': '32 hex chars',
     'cred.aesHint': '16-byte key — exactly 32 hexadecimal characters',
+    'cred.aesGenerate': 'Generate a new key',
+    'cred.aesGenerated': 'New key generated — save to apply. BLE clients (Home Assistant) must be updated with this key.',
     'cred.bleLogin': 'BLE login',
     'cred.blePassword': 'BLE password',
     'cred.bleHint': 'Secret required by BLE clients (noble). Independent of the web admin login.',
@@ -435,6 +444,8 @@ const messages = {
     'cred.aesKey': 'Clé AES',
     'cred.aesPlaceholder': '32 caractères hex',
     'cred.aesHint': 'Clé de 16 octets — exactement 32 caractères hexadécimaux',
+    'cred.aesGenerate': 'Générer une nouvelle clé',
+    'cred.aesGenerated': 'Nouvelle clé générée — enregistrez pour l\'appliquer. Les clients BLE (Home Assistant) devront être mis à jour avec cette clé.',
     'cred.bleLogin': 'Identifiant BLE',
     'cred.blePassword': 'Mot de passe BLE',
     'cred.bleHint': 'Secret requis par les clients BLE (noble). Indépendant de l\'identifiant admin web.',
@@ -692,6 +703,16 @@ async function loadConfig() {
     online.value = false
     errors.value.push(e.message || t('err.fetchConfig'))
   }
+}
+
+// Same format as Security::toHex on the device: 16 random bytes, uppercase hex.
+// Only fills the field; the key is persisted by saveConfig() like any change.
+function generateAesKey() {
+  const b = new Uint8Array(16)
+  crypto.getRandomValues(b)
+  aes_key.value = Array.from(b, x => x.toString(16).padStart(2, '0')).join('').toUpperCase()
+  show.aes = true
+  notice.value = t('cred.aesGenerated')
 }
 
 async function saveConfig() {
@@ -1132,6 +1153,7 @@ input:focus { border-color: var(--primary) }
   transition: color .15s;
 }
 .eye-btn:hover { color: var(--primary) }
+.input-group .eye-btn:not(:last-child) { border-radius: 0 }
 
 .hint { font-size: .78rem; color: var(--muted) }
 code { color: var(--primary); font-size: .85em }
