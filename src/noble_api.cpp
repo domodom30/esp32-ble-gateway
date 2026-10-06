@@ -299,7 +299,20 @@ void NobleApi::onWsEvent(uint8_t client, WStype_t type, uint8_t *payload, size_t
               // actions that require a connection
               else if (clientConnected(client, peripheralUuid))
               {
-                if (strcmp(action, "discoverServices") == 0)
+                if (strcmp(action, "disconnect") == 0)
+                {
+                  // Client-initiated disconnect (noble disconnect / cancelConnect).
+                  // With a live link, the reply is sent by onBLEDeviceDisconnected
+                  // once NimBLE reports the link down. Without one (connect still
+                  // in flight, link already gone) reply now so the client never
+                  // waits; drainConnResults releases a connect that completes later.
+                  if (!BLEApi::disconnect(peripheralUuid))
+                  {
+                    delClient(peripheralUuid);
+                    sendDisconnected(client, peripheralUuid, "not connected");
+                  }
+                }
+                else if (strcmp(action, "discoverServices") == 0)
                 {
                   const std::vector<NimBLERemoteService *> *services = BLEApi::discoverServices(peripheralUuid);
                   if (services != nullptr)
