@@ -272,22 +272,21 @@ bool BLEApi::connect(BLEPeripheralID id)
   return connected;
 }
 
+/**
+ * Start tearing down the BLE link to a device.
+ * @return true when a disconnect was actually initiated: the client callback
+ * (onDisconnect -> _onDeviceInteractionProxy) will then report the link down.
+ * false when there was no live link to close (nothing will be reported).
+ */
 bool BLEApi::disconnect(BLEPeripheralID id)
 {
-
   NimBLEClient *peripheral = getConnection(id);
-  if (peripheral != nullptr)
+  if (peripheral == nullptr || !peripheral->isConnected())
   {
-    if (peripheral->isConnected())
-    {
-      meminfo();
-      peripheral->disconnect();
-      // vTaskDelay(3000 / portTICK_PERIOD_MS);
-      // delete peripheral;
-      // meminfo();
-    }
+    return false;
   }
-  return true;
+  meminfo();
+  return peripheral->disconnect();
 }
 
 const std::vector<NimBLERemoteService *> *BLEApi::discoverServices(BLEPeripheralID id)
