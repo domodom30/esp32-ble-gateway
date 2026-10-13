@@ -11,7 +11,7 @@
         </span>
         <div class="brand-text">
           <div class="brand-name">Gateway Bluetooth</div>
-          <div class="brand-sub">v{{ version }}</div>
+          <div class="brand-sub" v-if="fwVersion">v{{ fwVersion }}</div>
         </div>
       </div>
 
@@ -98,18 +98,18 @@
               <label for="aes">{{ t('cred.aesKey') }}</label>
               <div class="input-group">
                 <input id="aes" :type="show.aes ? 'text' : 'password'" v-model="aes_key" :placeholder="t('cred.aesPlaceholder')" />
-                <button type="button" class="eye-btn" @click="generateAesKey" :title="t('cred.aesGenerate')" :aria-label="t('cred.aesGenerate')">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18">
-                    <polyline points="23 4 23 10 17 10"/>
-                    <polyline points="1 20 1 14 7 14"/>
-                    <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
-                  </svg>
-                </button>
-                <button type="button" class="eye-btn" @click="show.aes = !show.aes" :aria-label="show.aes ? t('common.hide') : t('common.show')">
+                <button type="button" class="eye-btn mid" @click="show.aes = !show.aes" :aria-label="show.aes ? t('common.hide') : t('common.show')">
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18">
                     <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
                     <circle cx="12" cy="12" r="3"/>
                     <line v-if="show.aes" x1="2" y1="2" x2="22" y2="22"/>
+                  </svg>
+                </button>
+                <button type="button" class="eye-btn" @click="askRegenAes" :title="t('cred.aesRegen')" :aria-label="t('cred.aesRegen')">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18">
+                    <polyline points="23 4 23 10 17 10"/>
+                    <polyline points="1 20 1 14 7 14"/>
+                    <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
                   </svg>
                 </button>
               </div>
@@ -155,6 +155,7 @@
               <label for="name">{{ t('net.gatewayName') }}</label>
               <input id="name" type="text" v-model="name" placeholder="my-gateway" />
               <span class="hint" v-if="name.length">MDNS: <code>{{ name }}.local</code></span>
+              <span class="hint" v-if="mac">{{ t('net.macAddress') }} : <code>{{ mac }}</code></span>
             </div>
 
             <div class="field">
@@ -177,28 +178,40 @@
             </div>
 
             <div class="field full section-sep">
-              <span class="section-label">{{ t('net.staticIp') }} <code>{{ t('net.staticIpOptional') }}</code></span>
+              <span class="section-label">{{ t('net.ipMode') }}</span>
             </div>
 
-            <div class="field">
-              <label for="static_ip">{{ t('net.ipAddress') }}</label>
-              <input id="static_ip" type="text" v-model="static_ip" placeholder="192.168.1.50" />
+            <div class="field full toggle-row">
+              <label class="switch">
+                <input type="checkbox" v-model="ipStatic" :aria-label="t('net.ipModeStatic')" />
+                <span class="switch-track"></span>
+              </label>
+              <div class="toggle-label">
+                <span>{{ ipStatic ? t('net.ipModeStatic') : t('net.ipModeDhcp') }}</span>
+              </div>
             </div>
 
-            <div class="field">
-              <label for="static_mask">{{ t('net.subnetMask') }}</label>
-              <input id="static_mask" type="text" v-model="static_mask" placeholder="255.255.255.0" />
-            </div>
+            <template v-if="ipStatic">
+              <div class="field">
+                <label for="static_ip">{{ t('net.ipAddress') }}</label>
+                <input id="static_ip" type="text" v-model="static_ip" placeholder="192.168.1.50" />
+              </div>
 
-            <div class="field">
-              <label for="static_gw">{{ t('net.gateway') }}</label>
-              <input id="static_gw" type="text" v-model="static_gw" placeholder="192.168.1.1" />
-            </div>
+              <div class="field">
+                <label for="static_mask">{{ t('net.subnetMask') }}</label>
+                <input id="static_mask" type="text" v-model="static_mask" placeholder="255.255.255.0" />
+              </div>
 
-            <div class="field">
-              <label for="static_dns">{{ t('net.dnsServer') }}</label>
-              <input id="static_dns" type="text" v-model="static_dns" placeholder="8.8.8.8" />
-            </div>
+              <div class="field">
+                <label for="static_gw">{{ t('net.gateway') }}</label>
+                <input id="static_gw" type="text" v-model="static_gw" placeholder="192.168.1.1" />
+              </div>
+
+              <div class="field">
+                <label for="static_dns">{{ t('net.dnsServer') }}</label>
+                <input id="static_dns" type="text" v-model="static_dns" placeholder="8.8.8.8" />
+              </div>
+            </template>
           </div>
 
           <div class="actions">
@@ -275,6 +288,7 @@
         <div class="spinner" style="margin:0 auto"></div>
         <h2>{{ reboot.title }}</h2>
         <p>{{ reboot.seconds > 0 ? t('reboot.redirecting', { s: reboot.seconds }) : t('reboot.waiting') }}</p>
+        <p v-if="reboot.note" class="hint">{{ reboot.note }}</p>
         <a class="btn btn-primary" :href="reboot.url">{{ t('reboot.openNow') }}</a>
       </modal>
     </div>
@@ -297,7 +311,6 @@
 
 <script setup>
 import { ref, reactive, computed, onMounted } from 'vue'
-import { version } from '../package.json'
 
 const REQUEST_TIMEOUT = 8000
 const THEME_KEY = 'ttlock_theme'
@@ -349,19 +362,24 @@ const messages = {
     'cred.aesKey': 'AES Key',
     'cred.aesPlaceholder': '32 hex chars',
     'cred.aesHint': '16-byte key — exactly 32 hexadecimal characters',
-    'cred.aesGenerate': 'Generate a new key',
-    'cred.aesGenerated': 'New key generated — save to apply. BLE clients (Home Assistant) must be updated with this key.',
+    'cred.aesRegen': 'Generate a new AES key',
+    'cred.aesRegenDone': 'New AES key generated. Click Save to apply it, then copy it into the add-on configuration.',
+    'dlg.aesRegenTitle': 'Regenerate AES key?',
+    'dlg.aesRegenMsg': 'A new random key will be filled in. Once saved, the add-on will no longer be able to talk to the gateway until its AES key is updated with the new value.',
+    'dlg.aesRegenConfirm': 'Generate',
     'cred.bleLogin': 'BLE login',
     'cred.blePassword': 'BLE password',
     'cred.bleHint': 'Secret required by BLE clients (noble). Independent of the web admin login.',
 
     'net.gatewayName': 'Gateway name',
+    'net.macAddress': 'MAC address',
     'net.wifiSsid': 'WiFi SSID',
     'net.wifiSsidPlaceholder': 'Network name',
     'net.wifiPassword': 'WiFi password',
     'net.wifiPasswordPlaceholder': 'Network password',
-    'net.staticIp': 'Static IP',
-    'net.staticIpOptional': '(optional — leave empty for DHCP)',
+    'net.ipMode': 'IP configuration',
+    'net.ipModeDhcp': 'Automatic (DHCP)',
+    'net.ipModeStatic': 'Manual (static IP)',
     'net.ipAddress': 'IP address',
     'net.subnetMask': 'Subnet mask',
     'net.gateway': 'Gateway',
@@ -396,6 +414,7 @@ const messages = {
     'reboot.restarting': 'ESP32 restarting',
     'reboot.factoryDone': 'Factory reset done — device rebooting',
     'reboot.firmwareDone': 'Firmware updated — ESP32 rebooting',
+    'reboot.dhcpNote': 'Switching to DHCP: the gateway will get a new IP address (see your router). Trying {url}.',
 
     'err.auth': 'Authentication failed — check admin login/password',
     'err.http': 'Request failed (HTTP {status})',
@@ -403,8 +422,9 @@ const messages = {
     'err.network': 'Cannot reach the ESP32 (network error)',
     'err.fetchConfig': 'Error fetching configuration',
     'err.aesFormat': 'AES key must be exactly 32 hexadecimal characters',
-    'err.staticIp': 'Static IP: enter a valid IP, mask and gateway (and DNS if set), or leave all empty for DHCP',
+    'err.staticIp': 'Static IP: enter a valid IP, mask and gateway (and DNS if set), or switch back to DHCP',
     'err.saveConfig': 'Error saving configuration',
+    'err.notApplied': 'The gateway did not apply the configuration (connection lost before it was saved). Please try again.',
     'err.restart': 'Restart failed',
     'err.factory': 'Factory reset failed',
     'err.updateHttp': 'Update failed (HTTP {status})',
@@ -444,19 +464,24 @@ const messages = {
     'cred.aesKey': 'Clé AES',
     'cred.aesPlaceholder': '32 caractères hex',
     'cred.aesHint': 'Clé de 16 octets — exactement 32 caractères hexadécimaux',
-    'cred.aesGenerate': 'Générer une nouvelle clé',
-    'cred.aesGenerated': 'Nouvelle clé générée — enregistrez pour l\'appliquer. Les clients BLE (Home Assistant) devront être mis à jour avec cette clé.',
+    'cred.aesRegen': 'Générer une nouvelle clé AES',
+    'cred.aesRegenDone': 'Nouvelle clé AES générée. Cliquez sur Sauvegarder pour l\'appliquer, puis recopiez-la dans la configuration de l\'add-on.',
+    'dlg.aesRegenTitle': 'Régénérer la clé AES ?',
+    'dlg.aesRegenMsg': 'Une nouvelle clé aléatoire va être renseignée. Une fois sauvegardée, l\'add-on ne pourra plus communiquer avec la passerelle tant que sa clé AES n\'aura pas été mise à jour avec la nouvelle valeur.',
+    'dlg.aesRegenConfirm': 'Générer',
     'cred.bleLogin': 'Identifiant BLE',
     'cred.blePassword': 'Mot de passe BLE',
     'cred.bleHint': 'Secret requis par les clients BLE (noble). Indépendant de l\'identifiant admin web.',
 
     'net.gatewayName': 'Nom de la passerelle',
+    'net.macAddress': 'Adresse MAC',
     'net.wifiSsid': 'SSID WiFi',
     'net.wifiSsidPlaceholder': 'Nom du réseau',
     'net.wifiPassword': 'Mot de passe WiFi',
     'net.wifiPasswordPlaceholder': 'Mot de passe du réseau',
-    'net.staticIp': 'IP statique',
-    'net.staticIpOptional': '(optionnel — laisser vide pour DHCP)',
+    'net.ipMode': 'Configuration IP',
+    'net.ipModeDhcp': 'Automatique (DHCP)',
+    'net.ipModeStatic': 'Manuelle (IP statique)',
     'net.ipAddress': 'Adresse IP',
     'net.subnetMask': 'Masque de sous-réseau',
     'net.gateway': 'Passerelle',
@@ -491,6 +516,7 @@ const messages = {
     'reboot.restarting': 'Redémarrage de l\'ESP32',
     'reboot.factoryDone': 'Réinitialisation effectuée — redémarrage de l\'appareil',
     'reboot.firmwareDone': 'Firmware mis à jour — redémarrage de l\'ESP32',
+    'reboot.dhcpNote': 'Passage en DHCP : la passerelle va obtenir une nouvelle adresse IP (visible dans votre routeur). Tentative via {url}.',
 
     'err.auth': 'Échec de l\'authentification — vérifiez l\'identifiant/mot de passe admin',
     'err.http': 'Échec de la requête (HTTP {status})',
@@ -498,8 +524,9 @@ const messages = {
     'err.network': 'Impossible de joindre l\'ESP32 (erreur réseau)',
     'err.fetchConfig': 'Erreur lors de la récupération de la configuration',
     'err.aesFormat': 'La clé AES doit contenir exactement 32 caractères hexadécimaux',
-    'err.staticIp': 'IP statique : saisissez une IP, un masque et une passerelle valides (et un DNS si renseigné), ou laissez tout vide pour DHCP',
+    'err.staticIp': 'IP statique : saisissez une IP, un masque et une passerelle valides (et un DNS si renseigné), ou repassez en DHCP',
     'err.saveConfig': 'Erreur lors de l\'enregistrement de la configuration',
+    'err.notApplied': 'La passerelle n\'a pas appliqué la configuration (connexion coupée avant l\'enregistrement). Réessayez.',
     'err.restart': 'Échec du redémarrage',
     'err.factory': 'Échec de la réinitialisation',
     'err.updateHttp': 'Échec de la mise à jour (HTTP {status})',
@@ -560,6 +587,15 @@ const static_ip   = ref('')
 const static_mask = ref('')
 const static_gw   = ref('')
 const static_dns  = ref('')
+const mac         = ref('')
+const fwVersion   = ref('')
+const ipStatic    = ref(false)
+// Values actually saved: the fields in manual mode, empty (= DHCP) otherwise.
+// Hidden fields keep their content so toggling back restores it.
+const effStatic = computed(() => ipStatic.value
+  ? { ip: static_ip.value.trim(), mask: static_mask.value.trim(),
+      gw: static_gw.value.trim(), dns: static_dns.value.trim() }
+  : { ip: '', mask: '', gw: '', dns: '' })
 const ready    = ref(false)
 const online   = ref(false)
 const errors   = ref([])
@@ -575,7 +611,7 @@ const dialog = reactive({
   open: false, title: '', message: '', confirmLabel: 'Confirm',
   danger: false, onConfirm: () => {},
 })
-const reboot = reactive({ active: false, seconds: 0, url: '', title: '' })
+const reboot = reactive({ active: false, seconds: 0, url: '', title: '', note: '' })
 const fwFile = ref(null)
 const ota = reactive({ uploading: false, preparing: false, progress: 0 })
 
@@ -594,10 +630,10 @@ const configChanged = computed(() => {
     c.wifi_pass !== wifi_pass.value ||
     c.aes_key !== aes_key.value ||
     (c.ble_token ?? '') !== bleToken.value ||
-    (c.static_ip   ?? '') !== static_ip.value ||
-    (c.static_mask ?? '') !== static_mask.value ||
-    (c.static_gw   ?? '') !== static_gw.value ||
-    (c.static_dns  ?? '') !== static_dns.value
+    (c.static_ip   ?? '') !== effStatic.value.ip ||
+    (c.static_mask ?? '') !== effStatic.value.mask ||
+    (c.static_gw   ?? '') !== effStatic.value.gw ||
+    (c.static_dns  ?? '') !== effStatic.value.dns
   )
 })
 
@@ -635,10 +671,15 @@ async function apiFetch(url, opts = {}) {
 
 // The device comes back at the address we're already on. Prefer it over the
 // mDNS name (.local is unreliable on Windows / without Bonjour); probing it is a
-// same-origin request, so no self-signed-cert hurdle. A configured static IP is
-// preferred in case the device moves there after reboot.
-function rebootTarget() {
-  return IPV4_RE.test(static_ip.value) ? `https://${static_ip.value}` : globalThis.location.origin
+// same-origin request, so no self-signed-cert hurdle. A saved static IP is
+// preferred in case the device moves there after reboot. When leaving a static
+// IP for DHCP (`prevStaticIp` set), the old address is gone and the new one is
+// unknown: fall back to the mDNS name.
+function rebootTarget(prevStaticIp = '') {
+  const ip = config.value.static_ip ?? ''
+  if (IPV4_RE.test(ip)) return `https://${ip}`
+  if (prevStaticIp !== '') return targetUrl(config.value.name)
+  return globalThis.location.origin
 }
 
 function targetUrl(gwName, ip) {
@@ -648,19 +689,37 @@ function targetUrl(gwName, ip) {
 // Show the reboot overlay, then redirect only once the device answers again —
 // not on a blind countdown that can land on a still-booting server (which the
 // browser reports as a timeout, making a healthy device look dead).
-function startReboot(url, title, seconds) {
+// opts.note: extra line shown in the overlay.
+// opts.expect: fields /config must report once the device is back. Only checked
+// same-origin (a cross-origin response can't be read). On mismatch the save
+// never reached the device: report it instead of redirecting.
+function startReboot(url, title, seconds, opts = {}) {
   reboot.url = url
   reboot.title = title
   reboot.seconds = seconds
+  reboot.note = opts.note ?? ''
   reboot.active = true
+  const sameOrigin = url === globalThis.location.origin
+  const expect = sameOrigin ? opts.expect : null
   let done = false
   let probe = null
-  const go = () => {
-    if (done) return
+  const stop = () => {
     done = true
     clearInterval(tick)
     if (probe) clearInterval(probe)
+  }
+  const go = () => {
+    if (done) return
+    stop()
     globalThis.location.href = url
+  }
+  // Keep the form as typed; config reflects the device again, so Save re-enables.
+  const notApplied = (deviceConfig) => {
+    if (done) return
+    stop()
+    config.value = deviceConfig
+    reboot.active = false
+    errors.value = [t('err.notApplied')]
   }
   // Countdown is now purely indicative; at 0 we keep waiting (no premature
   // redirect) — the "Open now" link stays available for a manual jump.
@@ -672,8 +731,17 @@ function startReboot(url, title, seconds) {
   setTimeout(() => {
     probe = setInterval(async () => {
       try {
-        await fetch(url + '/config', { credentials: 'include', cache: 'no-store' })
-        go() // any response (even 401) means the server is serving again
+        // Cross-origin: no-cors, an opaque response is enough to know it's up.
+        const res = await fetch(url + '/config', {
+          credentials: 'include', cache: 'no-store', mode: sameOrigin ? 'cors' : 'no-cors',
+        })
+        // any response (even 401) means the server is serving again
+        if (expect && res.ok) {
+          const data = await res.json()
+          const applied = Object.keys(expect).every(k => (data[k] ?? '') === expect[k])
+          if (!applied) return notApplied(data)
+        }
+        go()
       } catch (_) { /* still rebooting */ }
     }, 1500)
   }, 4000)
@@ -697,6 +765,9 @@ async function loadConfig() {
     static_mask.value = data.static_mask ?? ''
     static_gw.value   = data.static_gw   ?? ''
     static_dns.value  = data.static_dns  ?? ''
+    ipStatic.value    = static_ip.value !== ''
+    mac.value         = data.mac         ?? ''
+    fwVersion.value   = data.fw_version  ?? ''
     online.value   = true
     ready.value    = true
   } catch (e) {
@@ -721,21 +792,18 @@ async function saveConfig() {
     errors.value = [t('err.aesFormat')]
     return
   }
-  // Static IP is all-or-nothing: a partial/invalid set bricks the device.
-  const ipSet  = static_ip.value.trim()   !== ''
-  const mskSet = static_mask.value.trim() !== ''
-  const gwSet  = static_gw.value.trim()   !== ''
-  const dnsSet = static_dns.value.trim()  !== ''
-  if (ipSet || mskSet || gwSet) {
-    if (!ipSet || !mskSet || !gwSet ||
-        !IPV4_RE.test(static_ip.value) || !IPV4_RE.test(static_mask.value) ||
-        !IPV4_RE.test(static_gw.value) || (dnsSet && !IPV4_RE.test(static_dns.value))) {
-      errors.value = [t('err.staticIp')]
-      return
-    }
+  // Manual mode: ip + mask + gw are mandatory, DNS optional. A partial/invalid
+  // set bricks the device, so refuse it here (the firmware checks it too).
+  const st = effStatic.value
+  if (ipStatic.value &&
+      (!IPV4_RE.test(st.ip) || !IPV4_RE.test(st.mask) || !IPV4_RE.test(st.gw) ||
+       (st.dns !== '' && !IPV4_RE.test(st.dns)))) {
+    errors.value = [t('err.staticIp')]
+    return
   }
   saving.value = true
   errors.value = []
+  const prevStaticIp = config.value.static_ip ?? ''
   const c = { ...config.value }
   const payload = {}
   if (c.name !== name.value)         { payload.name     = name.value;     c.name     = name.value }
@@ -746,10 +814,19 @@ async function saveConfig() {
   if (c.aes_key !== aes_key.value)   { payload.aes_key  = aes_key.value;  c.aes_key  = aes_key.value }
   if ((c.ble_token ?? '') !== bleToken.value) { payload.ble_token = bleToken.value; c.ble_token = bleToken.value }
   // IP statique : toujours envoyée pour permettre la suppression (vide = DHCP)
-  payload.static_ip   = static_ip.value
-  payload.static_mask = static_mask.value
-  payload.static_gw   = static_gw.value
-  payload.static_dns  = static_dns.value
+  payload.static_ip   = c.static_ip   = st.ip
+  payload.static_mask = c.static_mask = st.mask
+  payload.static_gw   = c.static_gw   = st.gw
+  payload.static_dns  = c.static_dns  = st.dns
+  const rebootTo = (expect) => {
+    config.value = c
+    const url = rebootTarget(prevStaticIp)
+    const toDhcp = prevStaticIp !== '' && st.ip === ''
+    startReboot(url, t('reboot.configSaved'), 12, {
+      expect,
+      note: toDhcp ? t('reboot.dhcpNote', { url }) : '',
+    })
+  }
   try {
     const res = await apiFetch('/config', {
       method: 'POST',
@@ -758,16 +835,18 @@ async function saveConfig() {
     })
     const text = await res.text()
     if (text === 'OK') {
-      config.value = c
-      startReboot(rebootTarget(), t('reboot.configSaved'), 12)
+      rebootTo()
     } else {
       errors.value.push(t('err.saveConfig'))
     }
   } catch (e) {
-    // Connexion coupée après l'envoi = l'ESP32 a enregistré puis redémarre.
+    // Connexion coupée : l'ESP32 a peut-être enregistré puis redémarré, ou la
+    // requête ne lui est jamais parvenue. On vérifie au retour (même origine).
     if (isConnLost(e)) {
-      config.value = c
-      startReboot(rebootTarget(), t('reboot.configSaved'), 12)
+      // The firmware ignores empty values (except static_*): don't expect them.
+      const expect = Object.fromEntries(Object.entries(payload).filter(([k, v]) =>
+        k !== 'password' && (v !== '' || k.startsWith('static_'))))
+      rebootTo(expect)
     } else {
       errors.value.push(e.message || t('err.saveConfig'))
     }
@@ -832,6 +911,28 @@ function askFactoryReset() {
     confirmLabel: t('dlg.factoryConfirm'),
     onConfirm: doFactoryReset,
   })
+}
+
+function askRegenAes() {
+  Object.assign(dialog, {
+    open: true,
+    danger: true,
+    title: t('dlg.aesRegenTitle'),
+    message: t('dlg.aesRegenMsg'),
+    confirmLabel: t('dlg.aesRegenConfirm'),
+    onConfirm: regenAes,
+  })
+}
+
+// Clé générée côté navigateur (CSPRNG) ; elle n'est appliquée qu'au Sauvegarder,
+// via le flux habituel (validation hex + reboot).
+function regenAes() {
+  const bytes = new Uint8Array(16)
+  crypto.getRandomValues(bytes)
+  aes_key.value = Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('').toUpperCase()
+  show.aes = true
+  dialog.open = false
+  notice.value = t('cred.aesRegenDone')
 }
 
 async function doRestart() {
@@ -1153,7 +1254,7 @@ input:focus { border-color: var(--primary) }
   transition: color .15s;
 }
 .eye-btn:hover { color: var(--primary) }
-.input-group .eye-btn:not(:last-child) { border-radius: 0 }
+.eye-btn.mid { border-radius: 0 }
 
 .hint { font-size: .78rem; color: var(--muted) }
 code { color: var(--primary); font-size: .85em }

@@ -11,13 +11,10 @@
 #include "noble_api.h"
 #include "led.h"
 #include "util.h"
+#include "version.h"
 
 #define WIFI_CONNECT_RETRY 5
 #define WIFI_CONFIGURE_DNS_PORT 53
-
-// Bump on each build so the boot banner confirms which firmware is actually
-// running after an OTA (if it doesn't change, the OTA didn't switch slots).
-#define FW_VERSION "1.4.0"
 
 // Diagnostic heartbeat: loop() sets g_loopPhase before each subsystem and bumps
 // g_loopCount at the end of every iteration. A separate task (diagTask, other
@@ -174,6 +171,10 @@ bool setupWifi()
     if (applyStaticIp())
     {
       Serial.printf("Static IP configured: %s\n", GwSettings::getStaticIp());
+    }
+    else
+    {
+      Serial.println("Network mode: DHCP");
     }
 
     uint8_t wifiResult;

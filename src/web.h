@@ -9,8 +9,10 @@
 #define ESP_GW_WEBSERVER_SECURE_PORT 443
 #endif
 
-#ifndef ESP_GW_WEBSERVER_BUFFER_SIZE
-#define ESP_GW_WEBSERVER_BUFFER_SIZE 512
+// Upper bound for a JSON request body (POST /config, /led2). The body is read
+// into a transient heap buffer of this size, freed once the request is handled.
+#ifndef ESP_GW_WEBSERVER_MAX_BODY
+#define ESP_GW_WEBSERVER_MAX_BODY 2048
 #endif
 
 #include "gw_settings.h"
@@ -37,7 +39,6 @@ class WebManager {
     static HTTPSServer *serverSecure;
     static bool rebootRequired;
     static uint32_t rebootAt;
-    static uint8_t *buffer;
 
     static bool initCertificate();
     static void clearCertificate();
