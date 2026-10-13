@@ -776,6 +776,16 @@ async function loadConfig() {
   }
 }
 
+// Same format as Security::toHex on the device: 16 random bytes, uppercase hex.
+// Only fills the field; the key is persisted by saveConfig() like any change.
+function generateAesKey() {
+  const b = new Uint8Array(16)
+  crypto.getRandomValues(b)
+  aes_key.value = Array.from(b, x => x.toString(16).padStart(2, '0')).join('').toUpperCase()
+  show.aes = true
+  notice.value = t('cred.aesGenerated')
+}
+
 async function saveConfig() {
   if (!configChanged.value || saving.value) return
   if (aes_key.value !== '' && !/^[0-9a-fA-F]{32}$/.test(aes_key.value)) {
