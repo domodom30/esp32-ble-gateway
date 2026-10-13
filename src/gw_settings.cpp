@@ -304,6 +304,15 @@ void GwSettings::setLogin(const char *val, size_t len)
 
 static void _saveStr(Preferences &prefs, const char *key, char *&ptr, const char *val, size_t len)
 {
+  // Empty value = clear the setting. putBytes() with a zero length is a no-op,
+  // which would leave the old value in NVS and reload it on next boot.
+  if (len <= 1 || val[0] == '\0')
+  {
+    prefs.remove(key);
+    delete[] ptr;
+    ptr = nullptr;
+    return;
+  }
   prefs.putBytes(key, val, len - 1);
   delete[] ptr;
   ptr = new char[len];

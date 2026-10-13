@@ -1,9 +1,12 @@
 #include "web.h"
 #include <Update.h>
+#include <memory>
+#include <new>
 #include "noble_api.h"
 #include "ble_api.h"
 #include "led.h"
 #include "web_ui.h"
+#include "version.h"
 
 // Fenêtre laissée aux boucles serveur pour flusher la réponse TLS ("OK") vers le
 // client avant de couper la radio et rebooter (évite les faux « erreur réseau »).
@@ -16,7 +19,77 @@ SSLCert *WebManager::cert = nullptr;
 HTTPSServer *WebManager::serverSecure = nullptr;
 bool WebManager::rebootRequired = false;
 uint32_t WebManager::rebootAt = 0;
-uint8_t *WebManager::buffer = new uint8_t[ESP_GW_WEBSERVER_BUFFER_SIZE];
+
+// Serialize `doc` into an exactly-sized buffer and send it in one write: no
+// truncation whatever the content size, and no per-byte TLS writes.
+static void sendJson(HTTPResponse *res, JsonDocument &doc)
+{
+  size_t len = measureJson(doc);
+  std::unique_ptr<char[]> out(new (std::nothrow) char[len + 1]);
+  if (!out)
+  {
+    Serial.println("Out of memory serializing JSON response");
+    res->setStatusCode(500);
+    res->setStatusText("Out of memory");
+    res->println("500 Out of memory");
+    return;
+  }
+  serializeJson(doc, out.get(), len + 1);
+  res->write((uint8_t *)out.get(), len);
+}
+
+// Read the request body (at most ESP_GW_WEBSERVER_MAX_BODY bytes) and parse it
+// into `doc`. On failure, replies 413/400/500 itself and returns false.
+// The body is never logged: it may carry credentials (WiFi pass, AES key...).
+static bool readJsonBody(HTTPRequest *req, HTTPResponse *res, JsonDocument &doc)
+{
+  if (req->getContentLength() > ESP_GW_WEBSERVER_MAX_BODY)
+  {
+    Serial.printf("Request entity too large (%u bytes)\n", (unsigned)req->getContentLength());
+    res->setStatusCode(413);
+    res->setStatusText("Request entity too large");
+    res->println("413 Request entity too large");
+    return false;
+  }
+
+  std::unique_ptr<char[]> body(new (std::nothrow) char[ESP_GW_WEBSERVER_MAX_BODY]);
+  if (!body)
+  {
+    Serial.println("Out of memory reading request body");
+    res->setStatusCode(500);
+    res->setStatusText("Out of memory");
+    res->println("500 Out of memory");
+    return false;
+  }
+
+  size_t idx = 0;
+  // while "not everything read" or "buffer is full"
+  while (!req->requestComplete() && idx < ESP_GW_WEBSERVER_MAX_BODY)
+  {
+    idx += req->readChars(body.get() + idx, ESP_GW_WEBSERVER_MAX_BODY - idx);
+  }
+
+  if (!req->requestComplete())
+  {
+    Serial.println("Request entity too large");
+    res->setStatusCode(413);
+    res->setStatusText("Request entity too large");
+    res->println("413 Request entity too large");
+    return false;
+  }
+
+  // Length-bounded parse: no NUL terminator needed.
+  DeserializationError error = deserializeJson(doc, body.get(), idx);
+  if (error != DeserializationError::Ok)
+  {
+    Serial.printf("Invalid JSON format (%s, %u bytes)\n", error.c_str(), (unsigned)idx);
+    res->setStatusCode(400);
+    res->setStatusText("Invalid JSON format");
+    res->println("400 Invalid JSON format");
+    return false;
+  }
+  return true;
+}
 
 // true if `s` is exactly `expectedLen` hexadecimal characters
 static bool isHexString(const char *s, size_t expectedLen)
@@ -256,10 +329,12 @@ void WebManager::handleConfigGet(HTTPRequest *req, HTTPResponse *res)
   config["static_gw"] = GwSettings::getStaticGw() ? GwSettings::getStaticGw() : "";
   config["static_dns"] = GwSettings::getStaticDns() ? GwSettings::getStaticDns() : "";
 
-  size_t configLength = serializeJson(config, buffer, ESP_GW_WEBSERVER_BUFFER_SIZE);
-  config.clear();
+  // Read-only, informational (ignored by handleConfigSet)
+  config["mac"] = WiFi.macAddress();
+  config["fw_version"] = FW_VERSION;
 
-  res->write((uint8_t *)buffer, configLength);
+  sendJson(res, config);
+  config.clear();
 
   meminfo();
 }
@@ -268,35 +343,9 @@ void WebManager::handleConfigSet(HTTPRequest *req, HTTPResponse *res)
 {
   res->setHeader("Connection", "close");
 
-  size_t idx = 0;
-  // while "not everything read" or "buffer is full"
-  while (!req->requestComplete() && idx < ESP_GW_WEBSERVER_BUFFER_SIZE)
-  {
-    idx += req->readChars((char *)buffer + idx, ESP_GW_WEBSERVER_BUFFER_SIZE - idx);
-  }
-
-  if (!req->requestComplete())
-  {
-    Serial.println("Request entity too large");
-    Serial.println((char *)buffer);
-    res->setStatusCode(413);
-    res->setStatusText("Request entity too large");
-    res->println("413 Request entity too large");
-    return;
-  }
-
-  buffer[idx + 1] = '\0';
-
   JsonDocument config;
-  DeserializationError error = deserializeJson(config, buffer, idx + 1);
-
-  if (error != DeserializationError::Ok)
-  { // Check for errors in parsing
-    Serial.println("Invalid JSON format");
-    Serial.println((char *)buffer);
-    res->setStatusCode(400);
-    res->setStatusText("Invalid JSON format");
-    res->println("400 Invalid JSON format");
+  if (!readJsonBody(req, res, config))
+  {
     return;
   }
 
@@ -407,6 +456,17 @@ void WebManager::handleConfigSet(HTTPRequest *req, HTTPResponse *res)
     GwSettings::setStaticDns(sdns, strlen(sdns) + 1);
     rebootRequired = true;
   }
+  if (sip != nullptr)
+  {
+    if (GwSettings::hasStaticIp())
+    {
+      Serial.printf("Static IP set: %s\n", GwSettings::getStaticIp());
+    }
+    else
+    {
+      Serial.println("Static IP cleared -> DHCP");
+    }
+  }
 
   const char *bleToken = config["ble_token"];
   if (bleToken && strlen(bleToken) > 0)
@@ -445,34 +505,20 @@ void WebManager::handleLed2Get(HTTPRequest *req, HTTPResponse *res)
   doc["enabled"] = GwSettings::getLed2Enabled();
   doc["connected"] = NobleApi::isHaConnected();
 
-  size_t len = serializeJson(doc, buffer, ESP_GW_WEBSERVER_BUFFER_SIZE);
-  res->write((uint8_t *)buffer, len);
+  sendJson(res, doc);
 }
 
 void WebManager::handleLed2Set(HTTPRequest *req, HTTPResponse *res)
 {
   res->setHeader("Connection", "close");
 
-  size_t idx = 0;
-  while (!req->requestComplete() && idx < ESP_GW_WEBSERVER_BUFFER_SIZE)
+  JsonDocument doc;
+  if (!readJsonBody(req, res, doc))
   {
-    idx += req->readChars((char *)buffer + idx, ESP_GW_WEBSERVER_BUFFER_SIZE - idx);
-  }
-
-  if (!req->requestComplete())
-  {
-    res->setStatusCode(413);
-    res->setStatusText("Request entity too large");
-    res->println("413 Request entity too large");
     return;
   }
 
-  buffer[idx + 1] = '\0';
-
-  JsonDocument doc;
-  DeserializationError error = deserializeJson(doc, buffer, idx + 1);
-
-  if (error != DeserializationError::Ok || !doc["enabled"].is<bool>())
+  if (!doc["enabled"].is<bool>())
   {
     res->setStatusCode(400);
     res->setStatusText("Invalid JSON format");
@@ -490,8 +536,7 @@ void WebManager::handleLed2Set(HTTPRequest *req, HTTPResponse *res)
   JsonDocument resp;
   resp["enabled"] = enabled;
   resp["connected"] = NobleApi::isHaConnected();
-  size_t len = serializeJson(resp, buffer, ESP_GW_WEBSERVER_BUFFER_SIZE);
-  res->write((uint8_t *)buffer, len);
+  sendJson(res, resp);
 }
 
 void WebManager::handleFactoryReset(HTTPRequest *req, HTTPResponse *res)
